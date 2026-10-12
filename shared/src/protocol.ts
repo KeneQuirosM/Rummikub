@@ -1,0 +1,163 @@
+import type { Meld } from './melds.js';
+import type { TileId } from './tiles.js';
+
+/** Destino de un movimiento de ficha. */
+export type MoveTarget =
+  | { kind: 'rack' }
+  | { kind: 'new' }
+  | { kind: 'meld'; meldId: string; index: number };
+
+/** Intenciones que el cliente envía al servidor durante su turno. */
+export type Intent =
+  | { type: 'move'; tileId: TileId; to: MoveTarget }
+  | { type: 'undo' }
+  | { type: 'reset' }
+  | { type: 'draw' }
+  | { type: 'endTurn' };
+
+export type GameErrorCode =
+  | 'NOT_YOUR_TURN'
+  | 'GAME_OVER'
+  | 'BAD_INTENT'
+  | 'TILE_NOT_AVAILABLE'
+  | 'NOT_OPENED'
+  | 'CANT_TAKE_FROM_TABLE'
+  | 'MELD_NOT_FOUND'
+  | 'NOTHING_TO_UNDO'
+  | 'INVALID_MELDS'
+  | 'OPENING_TOO_LOW'
+  | 'OPENING_TABLE_TOUCHED'
+  | 'TILES_MISSING';
+
+export type RoomErrorCode =
+  | 'ROOM_NOT_FOUND'
+  | 'ROOM_FULL'
+  | 'BAD_REQUEST'
+  | 'NOT_IN_ROOM'
+  | 'RATE_LIMITED';
+
+export interface PublicPlayer {
+  name: string;
+  avatar: string;
+  connected: boolean;
+  rackCount: number;
+  opened: boolean;
+  isBot: boolean;
+  wins: number;
+}
+
+export type GameStatus = 'waiting' | 'playing' | 'ended';
+
+export interface GameResult {
+  /** Índice del ganador o null si empate. */
+  winner: 0 | 1 | null;
+  reason: 'out' | 'pool';
+  /** Puntos que quedaron en cada atril. */
+  points: [number, number];
+}
+
+export type GameEvent =
+  | { type: 'start'; seq: number }
+  | { type: 'draw'; player: 0 | 1; seq: number; timeout?: boolean }
+  | { type: 'play'; player: 0 | 1; seq: number; tiles: TileId[] }
+  | { type: 'end'; seq: number };
+
+/**
+ * Vista filtrada que cada jugador recibe. Nunca contiene el atril del rival ni el pozo.
+ * Durante el turno de cualquiera, `table` es la mesa "en edición" (pública).
+ */
+export interface PlayerView {
+  roomCode: string;
+  you: 0 | 1;
+  players: [PublicPlayer, PublicPlayer];
+  rack: TileId[];
+  table: Meld[];
+  poolCount: number;
+  turn: 0 | 1;
+  /** Epoch ms del servidor en que vence el turno (null = sin límite). */
+  turnDeadline: number | null;
+  serverNow: number;
+  turnSeconds: number;
+  status: GameStatus;
+  canUndo: boolean;
+  /** Fichas jugadas desde el atril en el turno actual (públicas porque están en la mesa). */
+  playedThisTurn: TileId[];
+  /** Ids de fichas que estaban en la mesa al empezar el turno. */
+  turnStartTable: TileId[];
+  lastEvent: GameEvent | null;
+  result: GameResult | null;
+  rematch: [boolean, boolean];
+  version: number;
+  /** Siguiente id de combinación (para predicción determinista en el cliente). */
+  nextMeldSeq: number;
+}
+
+export interface RoomSettings {
+  /** 0 = sin límite */
+  turnSeconds: number;
+}
+
+export interface ProfilePayload {
+  name: string;
+  avatar: string;
+}
+
+export interface CreateRoomPayload extends ProfilePayload {
+  settings: RoomSettings;
+}
+
+export interface JoinRoomPayload extends ProfilePayload {
+  code: string;
+  token?: string;
+}
+
+export type Ack<T = {}> = ({ ok: true } & T) | { ok: false; error: GameErrorCode | RoomErrorCode };
+
+export interface RoomJoined {
+  code: string;
+  token: string;
+  seat: 0 | 1;
+}
+
+export interface DragPayload {
+  /** Solo se reenvía si la ficha es pública (está en la mesa). */
+  tileId: TileId | null;
+  /** Coordenadas en el plano de la mesa (mundo). */
+  x: number;
+  z: number;
+  active: boolean;
+}
+
+export interface ChatMessage {
+  from: 0 | 1;
+  text: string;
+  at: number;
+}
+
+export const EMOTES = ['👍', '😂', '😮', '😡', '🔥', '👏', '🤔', '😎'] as const;
+
+export interface ClientToServerEvents {
+  'room:create': (p: CreateRoomPayload, ack: (r: Ack<RoomJoined>) => void) => void;
+  'room:join': (p: JoinRoomPayload, ack: (r: Ack<RoomJoined>) => void) => void;
+  'room:leave': () => void;
+  'game:intent': (i: Intent, ack: (r: Ack) => void) => void;
+  'game:rematch': () => void;
+  drag: (d: DragPayload) => void;
+  emote: (e: string) => void;
+  chat: (text: string) => void;
+}
+
+export interface ServerToClientEvents {
+  state: (v: PlayerView) => void;
+  drag: (d: DragPayload) => void;
+  emote: (e: { from: 0 | 1; emoji: string }) => void;
+  chat: (m: ChatMessage) => void;
+  'room:closed': () => void;
+}
+
+export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+export const ROOM_CODE_REGEX = /^[A-Z]{4}$/;
+export const MAX_NAME_LENGTH = 16;
+export const MAX_CHAT_LENGTH = 140;
+export const DEFAULT_TURN_SECONDS = 60;
+export const ALLOWED_TURN_SECONDS = [0, 30, 60, 90, 120, 180] as const;
