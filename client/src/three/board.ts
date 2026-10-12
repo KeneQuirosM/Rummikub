@@ -1,0 +1,1069 @@
+/**
+ * Escena de juego: mesa 3D (cámara en perspectiva) + atril fijo abajo (cámara ortográfica en px).
+ * Gestiona animaciones, arrastrar y soltar, tocar-y-tocar, pan/pinch de cámara y el fantasma del rival.
+ */
+import * as THREE from 'three';
+import { gsap } from 'gsap';
+import { analyzeMeld, type DragPayload, type MoveTarget, type PlayerView, type TileId } from '@rummi/shared';
+import { sfx, vibrate } from '../audio';
+import type { Engine, EngineScene, Quality } from './engine';
+import { Confetti } from './effects';
+import { TableEnvironment } from './environment';
+import { findDropTarget, layoutTable, STEP, type DropTarget, type TableLayout } from './layout';
+import { BACK_CELL, cellOf, createWoodTexture } from './textures';
+import { TILE_D, TILE_H, TILE_W, TileSet, type TileState } from './tileset';
+
+export interface BoardCallbacks {
+  move(tileId: TileId, to: MoveTarget, rackIndex?: number): boolean;
+  reorder(tileId: TileId, index: number): void;
+  drag(d: DragPayload): void;
+  notMyTurn(): void;
+  selectionChange?(tile: TileId | null): void;
+}
+
+export interface BoardInsets {
+  /** px tapados arriba por el HUD */
+  top: number;
+  /** px tapados abajo (barra de acciones) justo encima del atril */
+  bottom: number;
+  /** safe-area inferior */
+  safeBottom: number;
+  /** px tapados a la derecha (barra de acciones en landscape) */
+  right: number;
+}
+
+type Loc = 'table' | 'rack' | 'none';
+type Region = 'rack' | 'main';
+
+interface DragState {
+  tileId: TileId;
+  origin: 'rack' | 'table';
+  pointerId: number;
+  startX: number;
+  startY: number;
+  started: boolean;
+  touch: boolean;
+  region: Region;
+  target: DropTarget | null;
+  rackIndex: number;
+  lastSent: number;
+}
+
+const EL = THREE.MathUtils.degToRad(58); // elevación de la cámara
+const FOV = 38;
+const LIFT = 0.85;
+const JITTER = (id: number) => ((((id * 2654435761) >>> 0) % 1000) / 1000 - 0.5) * 0.03;
+
+const RACK_RX = Math.PI / 2 - 0.3;
+
+const TINT_NORMAL = [1, 1, 1] as const;
+const TINT_PLAYED = [1.0, 0.95, 0.82] as const;
+const TINT_INVALID = [1.0, 0.68, 0.66] as const;
+const TINT_SELECTED = [1.18, 1.04, 0.62] as const;
+
+export class BoardScene implements EngineScene {
+  readonly scene = new THREE.Scene();
+  readonly camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 200);
+  private env = new TableEnvironment(16, 12);
+  readonly tiles: TileSet;
+  private backs: TileSet;
+  private ghost: TileSet;
+  private ghostMats: THREE.Material[] = [];
+  private confetti = new Confetti();
+  private placeholder: THREE.Mesh;
+  private meldHalo: THREE.Mesh;
+
+  private rackScene = new THREE.Scene();
+  private rackCam = new THREE.OrthographicCamera(0, 1, 1, 0, -1000, 1000);
+  readonly rackTiles: TileSet;
+  private rackBg: THREE.Mesh;
+  private rackWood: THREE.Texture;
+  private rackLip: THREE.Mesh;
+
+  private w = 1;
+  private h = 1;
+  rackH = 160;
+  private tileWpx = 48;
+  private rackRows = 2;
+  private rackPad = 10;
+  private rackGap = 5;
+  private perRow = 8;
+  private scrollX = 0;
+  private insets: BoardInsets = { top: 64, bottom: 64, safeBottom: 0, right: 0 };
+
+  view: PlayerView | null = null;
+  private rackOrder: TileId[] = [];
+  private layout: TableLayout = layoutTable([], 12);
+  private rowWidth = 12;
+  private loc = new Map<TileId, Loc>();
+  private meldValid = new Map<string, boolean>();
+  private selected: TileId | null = null;
+  private drag: DragState | null = null;
+  private pointers = new Map<number, { x: number; y: number }>();
+  private gesture: { kind: 'pan' | 'pinch' | 'scroll'; lastX: number; lastY: number; dist: number } | null = null;
+  private cam = { tx: 0, tz: 0, dist: 18 };
+  private userCamera = false;
+  private ray = new THREE.Raycaster();
+  private plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  private tmpV = new THREE.Vector3();
+  private quality: Quality = 'high';
+  private disposed = false;
+  private interactive = true;
+
+  constructor(private engine: Engine, private cb: BoardCallbacks) {
+    const res = engine.res;
+    this.scene.background = new THREE.Color(0x07090a);
+    this.scene.fog = new THREE.Fog(0x07090a, 30, 70);
+    this.scene.add(this.env.group);
+
+    this.tiles = new TileSet(106, res, true);
+    this.backs = new TileSet(48, res, true);
+    // Fantasma translúcido para el arrastre del rival
+    const gBody = res.bodyMat.clone();
+    gBody.transparent = true;
+    gBody.opacity = 0.45;
+    gBody.depthWrite = false;
+    const gFace = res.faceMat.clone();
+    gFace.transparent = true;
+    gFace.opacity = 0.45;
+    gFace.depthWrite = false;
+    gFace.onBeforeCompile = res.faceMat.onBeforeCompile;
+    gFace.customProgramCacheKey = () => 'tileface-ghost';
+    this.ghostMats.push(gBody, gFace);
+    this.ghost = new TileSet(1, { ...res, bodyGeo: res.bodyGeo, faceGeo: res.faceGeo, shadowGeo: res.shadowGeo, bodyMat: gBody, faceMat: gFace, shadowMat: res.shadowMat }, true);
+    for (const s of [this.tiles, this.backs, this.ghost]) {
+      s.onDirty = engine.invalidate;
+      this.scene.add(s.group);
+    }
+    this.scene.add(this.confetti.mesh);
+
+    const phGeo = new THREE.PlaneGeometry(TILE_W * 1.02, TILE_D * 1.02);
+    phGeo.rotateX(-Math.PI / 2);
+    this.placeholder = new THREE.Mesh(
+      phGeo,
+      new THREE.MeshBasicMaterial({ color: 0xf2c75c, transparent: true, opacity: 0.32, depthWrite: false }),
+    );
+    this.placeholder.position.y = 0.01;
+    this.placeholder.visible = false;
+    this.scene.add(this.placeholder);
+    const haloGeo = new THREE.PlaneGeometry(1, 1);
+    haloGeo.rotateX(-Math.PI / 2);
+    this.meldHalo = new THREE.Mesh(
+      haloGeo,
+      new THREE.MeshBasicMaterial({ color: 0xf2c75c, transparent: true, opacity: 0.12, depthWrite: false }),
+    );
+    this.meldHalo.position.y = 0.006;
+    this.meldHalo.visible = false;
+    this.scene.add(this.meldHalo);
+
+    // Atril
+    this.rackWood = createWoodTexture();
+    this.rackWood.wrapS = THREE.MirroredRepeatWrapping;
+    this.rackWood.repeat.set(2, 1);
+    this.rackBg = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshStandardMaterial({ map: this.rackWood, roughness: 0.6 }));
+    this.rackBg.position.z = -200;
+    this.rackLip = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color: 0xe0b45a }));
+    this.rackLip.position.z = -150;
+    this.rackScene.add(this.rackBg, this.rackLip);
+    this.rackScene.add(new THREE.HemisphereLight(0xfff3e0, 0x3a2a1a, 1.4));
+    const rk = new THREE.DirectionalLight(0xffe2b8, 1.6);
+    rk.position.set(-0.3, 1, 2);
+    this.rackScene.add(rk);
+    this.rackTiles = new TileSet(106, res, false);
+    this.rackTiles.onDirty = engine.invalidate;
+    this.rackScene.add(this.rackTiles.group);
+    this.rackCam.position.z = 500;
+
+    this.bindInput();
+  }
+
+  // ---------------------------------------------------------------- layout & camera
+
+  setInsets(i: BoardInsets) {
+    this.insets = i;
+    this.resize(this.w, this.h);
+  }
+
+  resize(w: number, h: number) {
+    this.w = w;
+    this.h = h;
+    // Métrica del atril
+    const pad = this.rackPad, gap = this.rackGap;
+    const landscapeShort = w > h && h < 560;
+    const byW = (w - 2 * pad + gap) / 7.2 - gap;
+    const maxH = landscapeShort ? h * 0.24 : h * 0.3;
+    let rows = 2;
+    let byH = (maxH - 18 - gap) / 2 / 1.36;
+    let tw = Math.max(34, Math.min(byW, byH, 60));
+    // En pantallas anchas cabe una sola fila
+    const oneRowCap = Math.floor((w - 2 * pad + gap) / (Math.min(60, (maxH - 18) / 1.36) + gap));
+    if (landscapeShort || oneRowCap >= 18) {
+      rows = 1;
+      byH = (maxH - 18) / 1.36;
+      tw = Math.max(36, Math.min(byH, 60, byW));
+    }
+    this.rackRows = rows;
+    this.tileWpx = Math.round(tw);
+    const th = this.tileWpx * 1.36;
+    this.rackH = Math.round(12 + rows * th + (rows - 1) * gap + 8 + this.insets.safeBottom);
+    this.rackCam.left = 0;
+    this.rackCam.right = w;
+    this.rackCam.top = this.rackH;
+    this.rackCam.bottom = 0;
+    this.rackCam.updateProjectionMatrix();
+    this.rackBg.scale.set(w, this.rackH, 1);
+    this.rackBg.position.set(w / 2, this.rackH / 2, -200);
+    this.rackLip.scale.set(w, 2, 1);
+    this.rackLip.position.set(w / 2, this.rackH - 1, -150);
+
+    // Ancho de filas de la mesa según orientación
+    const mainH = Math.max(1, h - this.rackH);
+    const aspect = w / mainH;
+    this.rowWidth = aspect < 0.9 ? 10.8 : aspect < 1.4 ? 14 : 18;
+    this.camera.aspect = aspect;
+    this.camera.updateProjectionMatrix();
+    if (this.view) this.sync(this.view, this.rackOrder, false);
+    else this.applyCamera();
+    this.engine.invalidate();
+  }
+
+  get mainH() {
+    return Math.max(1, this.h - this.rackH);
+  }
+
+  /** Encaja la cámara para ver todo el contenido (búsqueda binaria proyectando las esquinas). */
+  fitCamera(animate = true) {
+    const L = this.layout;
+    const oppZ = this.opponentZ();
+    const minW = this.w < this.mainH ? 9 : 13;
+    const half = Math.max(minW / 2, -L.minX + 0.5, L.maxX + 0.5, this.rowWidth / 2 - 0.4);
+    const minX = -half, maxX = half;
+    const minZ = Math.min(L.minZ, oppZ - 1.2) - 0.3;
+    const maxZ = Math.max(L.maxZ, 2.2) + 0.5;
+    const tx = 0, tz = (minZ + maxZ) / 2;
+    const top = this.insets.top, bottom = this.insets.bottom, right = this.insets.right;
+    const corners = [
+      [minX, minZ], [maxX, minZ], [minX, maxZ], [maxX, maxZ],
+    ];
+    const fits = (dist: number) => {
+      this.placeCamera(tx, tz, dist);
+      for (const [x, z] of corners) {
+        this.tmpV.set(x!, TILE_H, z!).project(this.camera);
+        const sx = ((this.tmpV.x + 1) / 2) * this.w;
+        const sy = ((1 - this.tmpV.y) / 2) * this.mainH;
+        if (sx < 6 || sx > this.w - right - 6 || sy < top || sy > this.mainH - bottom - 4) return false;
+      }
+      return true;
+    };
+    let lo = 5, hi = 60;
+    for (let i = 0; i < 22; i++) {
+      const mid = (lo + hi) / 2;
+      if (fits(mid)) hi = mid;
+      else lo = mid;
+    }
+    const dist = hi;
+    this.placeCamera(this.cam.tx, this.cam.tz, this.cam.dist);
+    if (animate) {
+      gsap.to(this.cam, { tx, tz, dist, duration: 0.5, ease: 'power2.inOut', onUpdate: () => this.applyCamera() });
+    } else {
+      Object.assign(this.cam, { tx, tz, dist });
+      this.applyCamera();
+    }
+  }
+
+  recenter() {
+    this.userCamera = false;
+    this.fitCamera(true);
+  }
+
+  private placeCamera(tx: number, tz: number, dist: number) {
+    this.camera.position.set(tx, Math.sin(EL) * dist, tz + Math.cos(EL) * dist);
+    this.camera.lookAt(tx, 0, tz);
+    // Centrar el contenido en la zona libre entre el HUD superior y la barra inferior
+    const shiftY = (this.insets.top - this.insets.bottom) / 2;
+    const shiftX = this.insets.right / 2;
+    this.camera.setViewOffset(this.w, this.mainH, shiftX, -shiftY, this.w, this.mainH);
+    this.camera.updateMatrixWorld();
+  }
+
+  private applyCamera() {
+    this.placeCamera(this.cam.tx, this.cam.tz, this.cam.dist);
+    this.engine.invalidate();
+  }
+
+  private opponentZ() {
+    return Math.min(this.layout.minZ, -2.5) - 1.8;
+  }
+
+  // ---------------------------------------------------------------- sync
+
+  setInteractive(on: boolean) {
+    this.interactive = on;
+    if (!on) this.cancelDrag();
+  }
+
+  /** Sincroniza la escena con una vista nueva (anima solo lo que cambió). */
+  sync(view: PlayerView, rackOrder: TileId[], animate = true) {
+    const prevView = this.view;
+    const newGame = !prevView || (prevView.status === 'ended' && view.status === 'playing');
+    this.view = view;
+    this.rackOrder = rackOrder;
+    const previewMeld = this.drag?.started && this.drag.target?.kind === 'meld' ? this.drag.target : null;
+    this.layout = layoutTable(view.table, this.rowWidth);
+    // La cámara nunca se mueve sola mientras se arrastra una ficha
+    if (!this.userCamera && !this.drag?.started) this.fitCamera(animate && !newGame);
+
+    if (newGame) {
+      this.loc.clear();
+      this.meldValid.clear();
+      this.tiles.hideAll();
+      this.rackTiles.hideAll();
+      this.selected = null;
+    }
+    const nextLoc = new Map<TileId, Loc>();
+    for (const m of view.table) for (const t of m.tiles) nextLoc.set(t, 'table');
+    for (const t of view.rack) nextLoc.set(t, 'rack');
+
+    // Combinaciones que se volvieron válidas -> brillo
+    const glow = new Set<TileId>();
+    const nextValid = new Map<string, boolean>();
+    for (const m of view.table) {
+      const ok = analyzeMeld(m.tiles).valid;
+      nextValid.set(m.id, ok);
+      const was = this.meldValid.get(m.id);
+      if (ok && was !== true && !newGame && prevView) {
+        const prevMeld = prevView.table.find((p) => p.id === m.id);
+        if (!prevMeld || prevMeld.tiles.length !== m.tiles.length || !was) m.tiles.forEach((t) => glow.add(t));
+      }
+    }
+    this.meldValid = nextValid;
+    if (glow.size && animate) sfx.valid();
+
+    // Fichas de la mesa
+    const opp = this.opponentZ();
+    let oppIdx = 0;
+    for (const m of view.table) {
+      const box = this.layout.melds.find((b) => b.id === m.id)!;
+      m.tiles.forEach((t, i) => {
+        if (this.drag?.started && this.drag.tileId === t) return;
+        let x = box.x0 + i * STEP;
+        if (previewMeld && previewMeld.meldId === m.id) {
+          const others = m.tiles.filter((tt) => tt !== this.drag!.tileId);
+          const idx = others.indexOf(t);
+          x = box.x0 + idx * STEP + (idx >= (previewMeld.index ?? 0) ? STEP / 2 : -STEP / 2);
+        }
+        const target = { x, y: TILE_H / 2, z: box.z, rx: 0, ry: JITTER(t), rz: 0, s: 1 };
+        const prev = this.loc.get(t) ?? 'none';
+        const st = this.tiles.get(t);
+        if (prev === 'table' && st.visible) {
+          this.tweenTile(this.tiles, t, target, animate ? 0.3 : 0);
+        } else if (prev === 'rack') {
+          this.rackTiles.set(t, { visible: false });
+          const p = this.rackToWorld(this.rackTiles.get(t));
+          this.tiles.set(t, { ...p, y: LIFT, rx: 0, ry: 0, rz: 0, s: 1, visible: true, cell: cellOf(t) });
+          this.tweenTile(this.tiles, t, target, animate ? 0.32 : 0, 'back.out(1.4)');
+        } else {
+          // Viene del atril rival: vuela desde su lado y se voltea
+          const fromX = (oppIdx++ - 1) * 0.6;
+          this.tiles.set(t, { x: fromX, y: 0.9, z: opp, rx: 0, ry: 0, rz: animate ? Math.PI : 0, s: 1, visible: true, cell: cellOf(t) });
+          this.tweenTile(this.tiles, t, target, animate ? 0.6 : 0, 'power3.out', oppIdx * 0.06);
+        }
+      });
+    }
+    // Atril propio
+    const slots = this.rackSlots(rackOrder.filter((t) => !(this.drag?.started && this.drag.tileId === t)), this.drag?.started && this.drag.region === 'rack' ? this.drag.rackIndex : -1);
+    let dealIdx = 0;
+    const dealing = newGame;
+    for (const [t, slot] of slots) {
+      const prev = this.loc.get(t) ?? 'none';
+      const target = { x: slot.x, y: slot.y, z: 0, rx: RACK_RX, ry: 0, rz: 0, s: this.tileWpx };
+      if (prev === 'rack' && this.rackTiles.get(t).visible) {
+        this.tweenTile(this.rackTiles, t, target, animate ? 0.26 : 0);
+      } else if (prev === 'table') {
+        this.tiles.set(t, { visible: false });
+        const p = this.worldToRack(this.tiles.get(t));
+        this.rackTiles.set(t, { ...p, z: 0, rx: RACK_RX, ry: 0, rz: 0, s: this.tileWpx, visible: true, cell: cellOf(t) });
+        this.tweenTile(this.rackTiles, t, target, animate ? 0.3 : 0);
+      } else {
+        // Repartir / robar: cae desde arriba y se voltea
+        this.rackTiles.set(t, { x: this.w / 2, y: this.rackH + this.tileWpx * 2, z: 0, rx: RACK_RX, ry: animate ? Math.PI : 0, rz: 0, s: this.tileWpx, visible: true, cell: cellOf(t) });
+        this.tweenTile(this.rackTiles, t, target, animate ? 0.55 : 0, 'power3.out', dealing ? dealIdx++ * 0.045 : 0.05);
+      }
+    }
+    // Ocultar lo que ya no está
+    for (const [t, l] of this.loc) {
+      if (nextLoc.has(t)) continue;
+      if (l === 'table') this.tiles.set(t, { visible: false });
+      if (l === 'rack') this.rackTiles.set(t, { visible: false });
+    }
+    this.loc = nextLoc;
+    if (this.selected !== null && !nextLoc.has(this.selected)) this.select(null);
+    this.refreshTints(glow);
+    this.syncBacks(view, animate);
+    this.clampScroll();
+    this.engine.invalidate();
+  }
+
+  private tweenTile(set: TileSet, t: TileId, target: Partial<TileState>, duration: number, ease = 'power3.out', delay = 0) {
+    const st = set.get(t);
+    gsap.killTweensOf(st);
+    if (duration <= 0) {
+      set.set(t, { ...target, visible: true });
+      return;
+    }
+    st.visible = true;
+    gsap.to(st, { ...target, duration, delay, ease, onUpdate: () => set.markDirty(t), onComplete: () => set.markDirty(t) });
+  }
+
+  private baseTint(t: TileId): readonly [number, number, number] {
+    if (t === this.selected) return TINT_SELECTED;
+    if (this.loc.get(t) !== 'table') return TINT_NORMAL;
+    const m = this.view?.table.find((mm) => mm.tiles.includes(t));
+    if (m && !this.meldValid.get(m.id)) return TINT_INVALID;
+    if (this.view?.playedThisTurn.includes(t)) return TINT_PLAYED;
+    return TINT_NORMAL;
+  }
+
+  private refreshTints(glow: Set<TileId> = new Set()) {
+    for (const [t, l] of this.loc) {
+      const set = l === 'table' ? this.tiles : this.rackTiles;
+      const [r, g, b] = this.baseTint(t);
+      const st = set.get(t);
+      if (glow.has(t)) {
+        Object.assign(st, { r: 1.7, g: 1.5, b: 0.95 });
+        gsap.to(st, { r, g, b, duration: 0.9, ease: 'power2.out', onUpdate: () => set.markDirty(t) });
+      } else if (st.r !== r || st.g !== g || st.b !== b) {
+        gsap.to(st, { r, g, b, duration: 0.2, onUpdate: () => set.markDirty(t) });
+      }
+    }
+  }
+
+  /** Atril rival (dorsos, boca abajo) y pozo. */
+  private syncBacks(view: PlayerView, animate: boolean) {
+    const opp = view.players[1 - view.you]!;
+    const n = Math.min(opp.rackCount, 36);
+    const z = this.opponentZ();
+    const avail = Math.max(5, this.rowWidth - 3.2);
+    const scale = 0.62;
+    const sp = scale * TILE_W + 0.06;
+    const perRow = Math.max(1, Math.floor(avail / sp));
+    const cx = -1.4;
+    for (let i = 0; i < 36; i++) {
+      const st = this.backs.get(i);
+      if (i < n) {
+        const row = Math.floor(i / perRow);
+        const inRow = Math.min(perRow, n - row * perRow);
+        const col = i % perRow;
+        const target = { x: cx + (col - (inRow - 1) / 2) * sp, y: (TILE_H / 2) * scale, z: z - row * (TILE_D * scale + 0.08), rx: 0, ry: 0, rz: 0, s: scale };
+        if (!st.visible) this.backs.set(i, { ...target, y: 2, visible: true, cell: BACK_CELL, shadow: -1 });
+        this.tweenTile(this.backs, i, target, animate ? 0.35 : 0, 'power2.out', animate ? i * 0.01 : 0);
+      } else if (st.visible) {
+        gsap.killTweensOf(st);
+        this.backs.set(i, { visible: false });
+      }
+    }
+    // Pozo: montones de fichas boca abajo a la derecha del atril rival
+    const piles = Math.min(12, Math.ceil(view.poolCount / 7));
+    const px = this.rowWidth / 2 - 1.2;
+    for (let i = 0; i < 12; i++) {
+      const idx = 36 + i;
+      if (i < piles) {
+        const col = i % 2, lvl = Math.floor(i / 2);
+        this.backs.set(idx, {
+          x: px + col * 0.75,
+          y: (TILE_H / 2) * 0.7 + lvl * TILE_H * 0.7,
+          z: z + JITTER(i * 13) * 3,
+          rx: 0,
+          ry: JITTER(i * 7) * 5,
+          rz: 0,
+          s: 0.7,
+          visible: true,
+          cell: BACK_CELL,
+          shadow: -1,
+        });
+      } else if (this.backs.get(idx).visible) this.backs.set(idx, { visible: false });
+    }
+  }
+
+  // ---------------------------------------------------------------- rack geometry
+
+  private rackSlots(order: TileId[], gapIndex: number): Map<TileId, { x: number; y: number }> {
+    const n = order.length + (gapIndex >= 0 ? 1 : 0);
+    const step = this.tileWpx + this.rackGap;
+    const cap = Math.max(1, Math.floor((this.w - 2 * this.rackPad + this.rackGap) / step));
+    this.perRow = this.rackRows === 1 ? Math.max(cap, n) : Math.max(cap, Math.ceil(n / 2));
+    const th = this.tileWpx * 1.36;
+    const top = this.rackH - this.insets.safeBottom - 12;
+    const out = new Map<TileId, { x: number; y: number }>();
+    let slot = 0;
+    const pos = (s: number) => {
+      const row = Math.floor(s / this.perRow);
+      const col = s % this.perRow;
+      return {
+        x: this.rackPad + col * step + this.tileWpx / 2 - this.scrollX,
+        y: top - th / 2 - row * (th + this.rackGap),
+      };
+    };
+    for (const t of order) {
+      if (slot === gapIndex) slot++;
+      out.set(t, pos(slot));
+      slot++;
+    }
+    return out;
+  }
+
+  private contentWidth() {
+    return this.perRow * (this.tileWpx + this.rackGap) - this.rackGap;
+  }
+
+  private clampScroll() {
+    const max = Math.max(0, this.contentWidth() - (this.w - 2 * this.rackPad));
+    const s = Math.max(0, Math.min(max, this.scrollX));
+    if (s !== this.scrollX) {
+      this.scrollX = s;
+      if (this.view) this.sync(this.view, this.rackOrder, false);
+    }
+  }
+
+  scrollRack(dx: number) {
+    this.scrollX += dx;
+    const max = Math.max(0, this.contentWidth() - (this.w - 2 * this.rackPad));
+    this.scrollX = Math.max(0, Math.min(max, this.scrollX));
+    if (this.view) {
+      const slots = this.rackSlots(this.rackOrder.filter((t) => !(this.drag?.started && this.drag.tileId === t)), -1);
+      for (const [t, s] of slots) this.rackTiles.set(t, { x: s.x, y: s.y });
+    }
+  }
+
+  get canScrollRack(): { left: boolean; right: boolean } {
+    const max = Math.max(0, this.contentWidth() - (this.w - 2 * this.rackPad));
+    return { left: this.scrollX > 1, right: this.scrollX < max - 1 };
+  }
+
+  private rackIndexAt(rx: number, ry: number): number {
+    const step = this.tileWpx + this.rackGap;
+    const th = this.tileWpx * 1.36;
+    const top = this.rackH - this.insets.safeBottom - 12;
+    const row = this.rackRows === 1 ? 0 : Math.max(0, Math.min(1, Math.floor((top - ry) / (th + this.rackGap))));
+    const col = Math.max(0, Math.min(this.perRow, Math.round((rx + this.scrollX - this.rackPad - this.tileWpx / 2) / step)));
+    const n = this.rackOrder.filter((t) => t !== this.drag?.tileId).length;
+    return Math.max(0, Math.min(n, row * this.perRow + col));
+  }
+
+  // Conversión entre espacios (px del atril <-> mundo de la mesa)
+  private rackToWorld(st: TileState): { x: number; z: number } {
+    const sx = st.x, sy = this.h - st.y; // px de pantalla
+    return this.screenToTable(sx, sy) ?? { x: 0, z: this.layout.maxZ + 2 };
+  }
+
+  private worldToRack(st: TileState): { x: number; y: number } {
+    this.tmpV.set(st.x, st.y, st.z).project(this.camera);
+    const sx = ((this.tmpV.x + 1) / 2) * this.w;
+    const sy = ((1 - this.tmpV.y) / 2) * this.mainH;
+    return { x: sx, y: this.h - sy };
+  }
+
+  private screenToTable(sx: number, sy: number, height = 0): { x: number; z: number } | null {
+    const ndc = new THREE.Vector2((sx / this.w) * 2 - 1, -(sy / this.mainH) * 2 + 1);
+    this.ray.setFromCamera(ndc, this.camera);
+    this.plane.constant = -height;
+    const p = this.ray.ray.intersectPlane(this.plane, this.tmpV);
+    return p ? { x: p.x, z: p.z } : null;
+  }
+
+  // ---------------------------------------------------------------- input
+
+  private bindInput() {
+    const c = this.engine.canvas;
+    c.addEventListener('pointerdown', this.onDown);
+    c.addEventListener('pointermove', this.onMove);
+    c.addEventListener('pointerup', this.onUp);
+    c.addEventListener('pointercancel', this.onCancel);
+    c.addEventListener('wheel', this.onWheel, { passive: false });
+    c.addEventListener('contextmenu', this.prevent);
+  }
+
+  private unbindInput() {
+    const c = this.engine.canvas;
+    c.removeEventListener('pointerdown', this.onDown);
+    c.removeEventListener('pointermove', this.onMove);
+    c.removeEventListener('pointerup', this.onUp);
+    c.removeEventListener('pointercancel', this.onCancel);
+    c.removeEventListener('wheel', this.onWheel);
+    c.removeEventListener('contextmenu', this.prevent);
+  }
+
+  private prevent = (e: Event) => e.preventDefault();
+
+  private local(e: PointerEvent | WheelEvent) {
+    const r = this.engine.canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  private regionAt(y: number): Region {
+    return y > this.h - this.rackH ? 'rack' : 'main';
+  }
+
+  private hitRack(x: number, y: number): TileId | null {
+    const ndc = new THREE.Vector2((x / this.w) * 2 - 1, ((this.h - y) / this.rackH) * 2 - 1);
+    this.ray.setFromCamera(ndc, this.rackCam);
+    return this.rackTiles.raycast(this.ray);
+  }
+
+  private hitTable(x: number, y: number): TileId | null {
+    const ndc = new THREE.Vector2((x / this.w) * 2 - 1, -(y / this.mainH) * 2 + 1);
+    this.ray.setFromCamera(ndc, this.camera);
+    return this.tiles.raycast(this.ray);
+  }
+
+  canMoveTableTile(t: TileId): boolean {
+    const v = this.view;
+    if (!v || v.status !== 'playing' || v.turn !== v.you) return false;
+    return v.players[v.you].opened || v.playedThisTurn.includes(t);
+  }
+
+  private onDown = (e: PointerEvent) => {
+    if (!this.interactive || !this.view) return;
+    const p = this.local(e);
+    this.pointers.set(e.pointerId, p);
+    this.engine.canvas.setPointerCapture?.(e.pointerId);
+    if (this.pointers.size === 2 && !this.drag?.started) {
+      // pinch
+      this.drag = null;
+      const [a, b] = [...this.pointers.values()];
+      this.gesture = { kind: 'pinch', lastX: 0, lastY: 0, dist: Math.hypot(a!.x - b!.x, a!.y - b!.y) };
+      return;
+    }
+    if (this.pointers.size > 1) return;
+    const region = this.regionAt(p.y);
+    const hit = region === 'rack' ? this.hitRack(p.x, p.y) : this.hitTable(p.x, p.y);
+    if (hit !== null && (region === 'rack' || this.canMoveTableTile(hit))) {
+      this.drag = {
+        tileId: hit, origin: region === 'rack' ? 'rack' : 'table', pointerId: e.pointerId,
+        startX: p.x, startY: p.y, started: false, touch: e.pointerType !== 'mouse', region,
+        target: null, rackIndex: -1, lastSent: 0,
+      };
+      this.gesture = null;
+    } else {
+      this.drag = null;
+      this.gesture = { kind: region === 'rack' ? 'scroll' : 'pan', lastX: p.x, lastY: p.y, dist: 0 };
+      (this.gesture as { downX?: number; downY?: number; tapHit?: TileId | null }).downX = p.x;
+      (this.gesture as { downX?: number; downY?: number; tapHit?: TileId | null }).downY = p.y;
+      (this.gesture as { tapHit?: TileId | null }).tapHit = hit;
+    }
+  };
+
+  private onMove = (e: PointerEvent) => {
+    if (!this.pointers.has(e.pointerId)) return;
+    const p = this.local(e);
+    this.pointers.set(e.pointerId, p);
+    const g = this.gesture;
+    if (g?.kind === 'pinch' && this.pointers.size >= 2) {
+      const [a, b] = [...this.pointers.values()];
+      const d = Math.hypot(a!.x - b!.x, a!.y - b!.y);
+      if (g.dist > 0) {
+        this.cam.dist = Math.max(6, Math.min(40, (this.cam.dist * g.dist) / d));
+        this.userCamera = true;
+        this.applyCamera();
+      }
+      g.dist = d;
+      return;
+    }
+    if (g?.kind === 'pan') {
+      const dx = p.x - g.lastX, dy = p.y - g.lastY;
+      g.lastX = p.x;
+      g.lastY = p.y;
+      const worldPerPx = (2 * this.cam.dist * Math.tan(THREE.MathUtils.degToRad(FOV / 2))) / this.mainH;
+      this.cam.tx = Math.max(-20, Math.min(20, this.cam.tx - dx * worldPerPx));
+      this.cam.tz = Math.max(-16, Math.min(16, this.cam.tz - (dy * worldPerPx) / Math.sin(EL)));
+      if (Math.abs(dx) + Math.abs(dy) > 0) this.userCamera = true;
+      this.applyCamera();
+      return;
+    }
+    if (g?.kind === 'scroll') {
+      const dx = p.x - g.lastX;
+      g.lastX = p.x;
+      this.scrollRack(-dx);
+      return;
+    }
+    const d = this.drag;
+    if (!d || d.pointerId !== e.pointerId) return;
+    if (!d.started) {
+      if (Math.hypot(p.x - d.startX, p.y - d.startY) < 8) return;
+      d.started = true;
+      this.select(null);
+      sfx.pick();
+      vibrate(8);
+    }
+    this.updateDrag(p.x, p.y);
+  };
+
+  private updateDrag(x: number, y: number) {
+    const d = this.drag!;
+    const region = this.regionAt(y);
+    const lift = d.touch ? 44 : 0; // la ficha se ve por encima del dedo
+    d.region = region;
+    if (region === 'rack') {
+      // Mostrar en el atril
+      if (this.tiles.get(d.tileId).visible) this.tiles.set(d.tileId, { visible: false });
+      const st = this.rackTiles.get(d.tileId);
+      gsap.killTweensOf(st);
+      this.rackTiles.set(d.tileId, {
+        x, y: this.h - y + lift * 0.6, z: 50, rx: RACK_RX + 0.15, ry: 0, rz: -0.06, s: this.tileWpx * 1.12, visible: true, cell: cellOf(d.tileId),
+      });
+      const idx = this.rackIndexAt(x, this.h - y);
+      d.target = null;
+      this.placeholder.visible = false;
+      this.meldHalo.visible = false;
+      if (idx !== d.rackIndex) {
+        d.rackIndex = idx;
+        this.layoutRackPreview();
+      }
+      if (d.lastSent) {
+        this.cb.drag({ tileId: null, x: 0, z: 0, active: false });
+        d.lastSent = 0;
+      }
+    } else {
+      if (this.rackTiles.get(d.tileId).visible) this.rackTiles.set(d.tileId, { visible: false });
+      if (d.rackIndex !== -1) {
+        d.rackIndex = -1;
+        this.layoutRackPreview();
+      }
+      const wp = this.screenToTable(x, y - lift, LIFT) ?? { x: 0, z: 0 };
+      const st = this.tiles.get(d.tileId);
+      gsap.killTweensOf(st);
+      this.tiles.set(d.tileId, { x: wp.x, y: LIFT, z: wp.z, rx: -0.12, ry: 0, rz: -0.05, s: 1.06, visible: true, cell: cellOf(d.tileId), shadow: LIFT });
+      const target = findDropTarget(this.layout, wp.x, wp.z, d.tileId);
+      const changed = JSON.stringify(target) !== JSON.stringify(d.target);
+      d.target = target;
+      if (changed) this.showDropPreview(target);
+      const now = performance.now();
+      if (now - d.lastSent > 50) {
+        d.lastSent = now;
+        const isPublic = this.loc.get(d.tileId) === 'table';
+        this.cb.drag({ tileId: isPublic ? d.tileId : null, x: wp.x, z: wp.z, active: true });
+      }
+    }
+  }
+
+  private layoutRackPreview() {
+    if (!this.view) return;
+    const d = this.drag;
+    const order = this.rackOrder.filter((t) => t !== d?.tileId);
+    const slots = this.rackSlots(order, d && d.region === 'rack' ? d.rackIndex : -1);
+    for (const [t, s] of slots) this.tweenTile(this.rackTiles, t, { x: s.x, y: s.y }, 0.15);
+  }
+
+  private showDropPreview(target: DropTarget) {
+    if (!this.view) return;
+    // Re-sincroniza la mesa con el hueco de previsualización
+    this.sync(this.view, this.rackOrder, true);
+    if (target.kind === 'new') {
+      this.meldHalo.visible = false;
+      this.placeholder.visible = true;
+      this.placeholder.position.set(this.layout.next.x, 0.01, this.layout.next.z);
+    } else {
+      const box = this.layout.melds.find((b) => b.id === target.meldId);
+      if (!box) return;
+      const others = box.tiles.filter((t) => t !== this.drag?.tileId);
+      const idx = target.index ?? 0;
+      const x = box.x0 + idx * STEP - STEP / 2;
+      this.placeholder.visible = true;
+      this.placeholder.position.set(x, 0.01, box.z);
+      this.meldHalo.visible = true;
+      const width = others.length * STEP + STEP + 0.3;
+      this.meldHalo.scale.set(width, 1, TILE_D + 0.4);
+      this.meldHalo.position.set(box.x0 - TILE_W / 2 - STEP / 2 - 0.15 + width / 2, 0.006, box.z);
+    }
+    this.engine.invalidate();
+  }
+
+  private onUp = (e: PointerEvent) => {
+    const p = this.local(e);
+    this.pointers.delete(e.pointerId);
+    const g = this.gesture;
+    if (g) {
+      if (this.pointers.size === 0) {
+        const gg = g as { downX?: number; downY?: number; tapHit?: TileId | null };
+        const moved = gg.downX !== undefined ? Math.hypot(p.x - gg.downX, p.y - (gg.downY ?? 0)) : 99;
+        if ((g.kind === 'pan' || g.kind === 'scroll') && moved < 8) this.onTap(p.x, p.y, gg.tapHit ?? null);
+        this.gesture = null;
+      } else if (g.kind === 'pinch') {
+        g.dist = 0;
+      }
+      return;
+    }
+    const d = this.drag;
+    if (!d || d.pointerId !== e.pointerId) return;
+    this.drag = null;
+    if (!d.started) {
+      this.onTap(p.x, p.y, d.tileId);
+      return;
+    }
+    this.finishDrag(d);
+  };
+
+  private onCancel = (e: PointerEvent) => {
+    this.pointers.delete(e.pointerId);
+    this.gesture = null;
+    this.cancelDrag();
+  };
+
+  private cancelDrag() {
+    const d = this.drag;
+    this.drag = null;
+    this.placeholder.visible = false;
+    this.meldHalo.visible = false;
+    if (d?.started) {
+      this.cb.drag({ tileId: null, x: 0, z: 0, active: false });
+      this.restoreTile(d.tileId);
+    }
+  }
+
+  /** Devuelve una ficha a su sitio según la vista actual. */
+  private restoreTile(t: TileId) {
+    const where = this.loc.get(t);
+    // Si se ve en el conjunto equivocado, el sync la trasladará
+    if (where === 'rack' && this.tiles.get(t).visible) this.loc.set(t, 'table');
+    if (where === 'table' && this.rackTiles.get(t).visible) this.loc.set(t, 'rack');
+    if (this.view) this.sync(this.view, this.rackOrder, true);
+  }
+
+  private finishDrag(d: DragState) {
+    this.placeholder.visible = false;
+    this.meldHalo.visible = false;
+    this.cb.drag({ tileId: null, x: 0, z: 0, active: false });
+    vibrate(12);
+    if (d.region === 'rack') {
+      sfx.rack();
+      const idx = d.rackIndex >= 0 ? d.rackIndex : this.rackOrder.length;
+      if (d.origin === 'rack') {
+        // la ficha se ve en el atril: marcar como tal y reordenar
+        this.cb.reorder(d.tileId, idx);
+      } else {
+        // Tabla -> atril: solo fichas propias de este turno
+        this.loc.set(d.tileId, 'rack');
+        this.tiles.set(d.tileId, { visible: false });
+        const ok = this.cb.move(d.tileId, { kind: 'rack' }, idx);
+        if (!ok) this.loc.set(d.tileId, 'rack');
+      }
+      this.restoreTile(d.tileId);
+      return;
+    }
+    sfx.drop();
+    const v = this.view;
+    if (!v || v.status !== 'playing' || v.turn !== v.you) {
+      this.cb.notMyTurn();
+      this.restoreTile(d.tileId);
+      return;
+    }
+    const target = d.target ?? { kind: 'new' };
+    // La ficha ya está visible en la mesa: registrarla como "table" para que el sync la anime desde ahí
+    this.loc.set(d.tileId, 'table');
+    this.rackTiles.set(d.tileId, { visible: false });
+    const to: MoveTarget = target.kind === 'meld' ? { kind: 'meld', meldId: target.meldId!, index: target.index ?? 0 } : { kind: 'new' };
+    const ok = this.cb.move(d.tileId, to);
+    if (!ok) {
+      // Se rechazó (p. ej. sin abrir): vuelve con un "rebote"
+      sfx.invalid();
+      vibrate([20, 40, 20]);
+      this.loc.set(d.tileId, 'table');
+      this.restoreTile(d.tileId);
+    }
+  }
+
+  private onTap(x: number, y: number, hit: TileId | null) {
+    const region = this.regionAt(y);
+    const sel = this.selected;
+    if (sel === null) {
+      if (hit !== null && (region === 'rack' || this.canMoveTableTile(hit))) {
+        this.select(hit);
+        sfx.pick();
+      }
+      return;
+    }
+    if (hit === sel) {
+      this.select(null);
+      return;
+    }
+    const selLoc = this.loc.get(sel);
+    if (region === 'rack') {
+      if (hit !== null && selLoc === 'rack') {
+        // Cambiar selección dentro del atril
+        this.select(hit);
+        sfx.pick();
+        return;
+      }
+      const idx = this.rackIndexAt(x, this.h - y);
+      this.select(null);
+      if (selLoc === 'rack') this.cb.reorder(sel, idx);
+      else this.cb.move(sel, { kind: 'rack' }, idx);
+      sfx.rack();
+      return;
+    }
+    // Destino en la mesa
+    const v = this.view;
+    if (!v || v.turn !== v.you || v.status !== 'playing') {
+      this.cb.notMyTurn();
+      return;
+    }
+    let target: DropTarget;
+    if (hit !== null && this.loc.get(hit) === 'table') {
+      const box = this.layout.melds.find((b) => b.tiles.includes(hit))!;
+      const p = this.screenToTable(x, y, TILE_H) ?? { x: 0, z: 0 };
+      const tp = this.layout.pos.get(hit)!;
+      const others = box.tiles.filter((t) => t !== sel);
+      const i = others.indexOf(hit);
+      target = { kind: 'meld', meldId: box.id, index: p.x > tp.x ? i + 1 : i };
+    } else {
+      const p = this.screenToTable(x, y);
+      target = p ? findDropTarget(this.layout, p.x, p.z, sel) : { kind: 'new' };
+    }
+    this.select(null);
+    const to: MoveTarget = target.kind === 'meld' ? { kind: 'meld', meldId: target.meldId!, index: target.index ?? 0 } : { kind: 'new' };
+    sfx.drop();
+    vibrate(12);
+    if (!this.cb.move(sel, to)) sfx.invalid();
+  }
+
+  private select(t: TileId | null) {
+    const prev = this.selected;
+    this.selected = t;
+    for (const id of [prev, t]) {
+      if (id === null) continue;
+      const l = this.loc.get(id);
+      const set = l === 'table' ? this.tiles : this.rackTiles;
+      const st = set.get(id);
+      if (l === 'table') this.tweenTile(set, id, { y: id === t ? TILE_H / 2 + 0.35 : TILE_H / 2 }, 0.15);
+      else if (l === 'rack' && this.view) {
+        const slot = this.rackSlots(this.rackOrder, -1).get(id);
+        if (slot) this.tweenTile(set, id, { y: slot.y + (id === t ? this.tileWpx * 0.25 : 0) }, 0.15);
+      }
+      void st;
+    }
+    this.refreshTints();
+    this.cb.selectionChange?.(t);
+  }
+
+  clearSelection() {
+    this.select(null);
+  }
+
+  private onWheel = (e: WheelEvent) => {
+    e.preventDefault();
+    const p = this.local(e);
+    if (this.regionAt(p.y) === 'rack') {
+      this.scrollRack(e.deltaY + e.deltaX);
+      return;
+    }
+    this.cam.dist = Math.max(6, Math.min(40, this.cam.dist * (1 + e.deltaY * 0.0012)));
+    this.userCamera = true;
+    this.applyCamera();
+  };
+
+  // ---------------------------------------------------------------- efectos
+
+  /** Fantasma de la ficha que arrastra el rival. */
+  showGhost(d: DragPayload) {
+    const st = this.ghost.get(0);
+    if (!d.active) {
+      gsap.killTweensOf(st);
+      if (st.visible) this.ghost.set(0, { visible: false });
+      return;
+    }
+    const cell = d.tileId !== null ? cellOf(d.tileId) : BACK_CELL;
+    if (!st.visible) {
+      this.ghost.set(0, { x: d.x, y: LIFT, z: d.z, rx: -0.1, ry: 0, rz: 0.05, s: 1.04, visible: true, cell, shadow: LIFT });
+    } else {
+      st.cell = cell;
+      gsap.to(st, { x: d.x, z: d.z, duration: 0.09, ease: 'none', onUpdate: () => this.ghost.markDirty(0) });
+    }
+  }
+
+  /** Sacudida roja de las combinaciones inválidas (al intentar terminar el turno). */
+  shakeInvalid() {
+    if (!this.view) return;
+    for (const m of this.view.table) {
+      if (this.meldValid.get(m.id)) continue;
+      for (const t of m.tiles) {
+        const st = this.tiles.get(t);
+        const x = st.x;
+        gsap.fromTo(st, { x: x - 0.12 }, { x, duration: 0.45, ease: 'elastic.out(1.2, 0.25)', onUpdate: () => this.tiles.markDirty(t) });
+        Object.assign(st, { r: 1.6, g: 0.45, b: 0.45 });
+        gsap.to(st, { r: TINT_INVALID[0], g: TINT_INVALID[1], b: TINT_INVALID[2], duration: 0.8, onUpdate: () => this.tiles.markDirty(t) });
+      }
+    }
+  }
+
+  celebrate() {
+    const count = this.quality === 'high' ? 240 : this.quality === 'medium' ? 140 : 60;
+    this.confetti.burst(new THREE.Vector3(this.cam.tx, 1, this.cam.tz), count);
+  }
+
+  setQuality(q: Quality) {
+    this.quality = q;
+    const shadows = q !== 'low';
+    this.tiles.setShadowsVisible(shadows);
+    this.backs.setShadowsVisible(shadows);
+    this.ghost.setShadowsVisible(shadows);
+    this.env.setEnvironment(this.scene, this.engine.renderer, q === 'high');
+    this.engine.invalidate();
+  }
+
+  continuous(): boolean {
+    return this.confetti.active;
+  }
+
+  update(dt: number) {
+    if (this.confetti.active) this.confetti.update(dt);
+  }
+
+  render(r: THREE.WebGLRenderer) {
+    this.tiles.flush();
+    this.backs.flush();
+    this.ghost.flush();
+    this.rackTiles.flush();
+    const w = this.w, h = this.h;
+    r.setScissorTest(true);
+    r.setViewport(0, this.rackH, w, h - this.rackH);
+    r.setScissor(0, this.rackH, w, h - this.rackH);
+    r.render(this.scene, this.camera);
+    r.setViewport(0, 0, w, this.rackH);
+    r.setScissor(0, 0, w, this.rackH);
+    r.clearDepth();
+    r.render(this.rackScene, this.rackCam);
+    r.setScissorTest(false);
+    r.setViewport(0, 0, w, h);
+  }
+
+  /** Posición en pantalla de la mesa (para HUD/tutorial). */
+  screenOfTableCenter(): { x: number; y: number } {
+    this.tmpV.set(this.cam.tx, 0, this.cam.tz).project(this.camera);
+    return { x: ((this.tmpV.x + 1) / 2) * this.w, y: ((1 - this.tmpV.y) / 2) * this.mainH };
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.unbindInput();
+    for (const s of [this.tiles, this.backs, this.ghost, this.rackTiles]) {
+      s.states.forEach((st) => gsap.killTweensOf(st));
+      s.dispose();
+    }
+    gsap.killTweensOf(this.cam);
+    this.ghostMats.forEach((m) => m.dispose());
+    this.confetti.dispose();
+    this.env.dispose();
+    (this.placeholder.material as THREE.Material).dispose();
+    this.placeholder.geometry.dispose();
+    (this.meldHalo.material as THREE.Material).dispose();
+    this.meldHalo.geometry.dispose();
+    this.rackBg.geometry.dispose();
+    (this.rackBg.material as THREE.Material).dispose();
+    this.rackLip.geometry.dispose();
+    (this.rackLip.material as THREE.Material).dispose();
+    this.rackWood.dispose();
+    this.scene.clear();
+    this.rackScene.clear();
+  }
+}
