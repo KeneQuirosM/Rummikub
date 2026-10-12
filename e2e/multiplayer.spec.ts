@@ -46,8 +46,9 @@ test('dos jugadores: crear sala, unirse por link, jugar un turno y sincronizar',
 
   // B entra con el link compartido
   await B.goto(`/?r=${code}`);
-  await expect(A.locator('#hud')).toBeVisible();
-  await expect(B.locator('#hud')).toBeVisible();
+  // La primera escena 3D compila shaders (lento con WebGL por software en CI)
+  await expect(A.locator('#hud')).toBeVisible({ timeout: 30_000 });
+  await expect(B.locator('#hud')).toBeVisible({ timeout: 30_000 });
   await expect(A.locator('#opp-name')).toHaveText('Beto');
   await expect(B.locator('#opp-name')).toHaveText('Ana');
 

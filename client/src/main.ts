@@ -344,6 +344,11 @@ async function exitImmersive() {
   if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
 }
 
+// iOS Safari ignora user-scalable=no: bloquear pellizco y doble toque del navegador
+for (const ev of ['gesturestart', 'gesturechange', 'dblclick']) {
+  document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+}
+
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && session) void requestWakeLock();
 });
