@@ -6,17 +6,25 @@ import { randomUUID } from 'node:crypto';
 import {
   ALLOWED_TURN_SECONDS,
   applyIntent,
+  botMoveToIntent,
   checkTimeout,
   createGame,
   currentTable,
   DEFAULT_TURN_SECONDS,
   EMOTES,
+  forceDraw,
+  forceFinish,
   MAX_CHAT_LENGTH,
   MAX_NAME_LENGTH,
+  MAX_PLAYERS,
+  MIN_PLAYERS,
+  planBotTurn,
   ROOM_CODE_ALPHABET,
   ROOM_CODE_REGEX,
   sanitizeIntent,
+  turnContext,
   viewFor,
+  type BotMove,
   type DragPayload,
   type GameErrorCode,
   type GameState,
@@ -33,24 +41,36 @@ export interface SeatInfo {
   avatar: string;
   socketId: string | null;
   wins: number;
+  /** Abandonó a mitad de partida: el bot juega por él. */
+  replaced: boolean;
+  /** Momento en que se desconectó (null si está conectado). */
+  disconnectedAt: number | null;
 }
 
 export interface Room {
   code: string;
   settings: RoomSettings;
-  seats: [SeatInfo | null, SeatInfo | null];
+  /** Asientos en orden de turno. Durante la partida, el índice coincide con el asiento del juego. */
+  seats: SeatInfo[];
+  /** Índice del anfitrión en `seats`. */
+  host: number;
   game: GameState | null;
-  rematch: [boolean, boolean];
+  rematch: boolean[];
   lastActivity: number;
   createdAt: number;
   gamesPlayed: number;
   /** El resultado de la partida actual ya se contó en el marcador. */
   counted: boolean;
+  /** Plan del bot sustituto para el turno en curso. */
+  botPlan: { key: string; moves: BotMove[]; play: boolean } | null;
 }
 
 export type JoinResult =
   | { ok: true; room: Room; seat: Seat; token: string; reconnected: boolean }
   | { ok: false; error: RoomErrorCode };
+
+/** Tiempo que se espera a un jugador desconectado en su turno si no hay límite de tiempo. */
+export const ABSENT_TURN_MS = 60_000;
 
 export function sanitizeName(raw: unknown): string {
   const s = typeof raw === 'string' ? raw : '';
@@ -95,22 +115,40 @@ export class RoomManager {
     throw new Error('No hay códigos libres');
   }
 
+  private newSeat(profile: { name: unknown; avatar: unknown }, socketId: string): SeatInfo {
+    return {
+      token: randomUUID(),
+      name: sanitizeName(profile.name),
+      avatar: sanitizeAvatar(profile.avatar),
+      socketId,
+      wins: 0,
+      replaced: false,
+      disconnectedAt: null,
+    };
+  }
+
+  seatByToken(room: Room, token: string | undefined): number {
+    return token ? room.seats.findIndex((s) => s.token === token) : -1;
+  }
+
   create(profile: { name: unknown; avatar: unknown }, settings: unknown, socketId: string): { room: Room; seat: Seat; token: string } {
     const code = this.newCode();
-    const token = randomUUID();
+    const seat = this.newSeat(profile, socketId);
     const room: Room = {
       code,
       settings: sanitizeSettings(settings),
-      seats: [{ token, name: sanitizeName(profile.name), avatar: sanitizeAvatar(profile.avatar), socketId, wins: 0 }, null],
+      seats: [seat],
+      host: 0,
       game: null,
-      rematch: [false, false],
+      rematch: [],
       lastActivity: this.now(),
       createdAt: this.now(),
       gamesPlayed: 0,
       counted: false,
+      botPlan: null,
     };
     this.rooms.set(code, room);
-    return { room, seat: 0, token };
+    return { room, seat: 0, token: seat.token };
   }
 
   join(rawCode: unknown, profile: { name: unknown; avatar: unknown }, token: unknown, socketId: string): JoinResult {
@@ -119,32 +157,50 @@ export class RoomManager {
     const room = this.rooms.get(code);
     if (!room) return { ok: false, error: 'ROOM_NOT_FOUND' };
     room.lastActivity = this.now();
-    // Reconexión con token
-    if (typeof token === 'string' && token) {
-      const idx = room.seats.findIndex((s) => s?.token === token);
-      if (idx >= 0) {
-        const s = room.seats[idx]!;
-        s.socketId = socketId;
-        if (profile.name !== undefined) s.name = sanitizeName(profile.name);
-        if (profile.avatar !== undefined) s.avatar = sanitizeAvatar(profile.avatar);
-        return { ok: true, room, seat: idx as Seat, token, reconnected: true };
-      }
+    // Reconexión con token (aunque haya abandonado: recupera su asiento)
+    const idx = this.seatByToken(room, typeof token === 'string' ? token : undefined);
+    if (idx >= 0) {
+      const s = room.seats[idx]!;
+      s.socketId = socketId;
+      s.disconnectedAt = null;
+      s.replaced = false;
+      if (profile.name !== undefined) s.name = sanitizeName(profile.name);
+      if (profile.avatar !== undefined) s.avatar = sanitizeAvatar(profile.avatar);
+      return { ok: true, room, seat: idx, token: s.token, reconnected: true };
     }
-    const free = room.seats.findIndex((s) => s === null);
-    if (free < 0) return { ok: false, error: 'ROOM_FULL' };
-    const newToken = randomUUID();
-    room.seats[free] = { token: newToken, name: sanitizeName(profile.name), avatar: sanitizeAvatar(profile.avatar), socketId, wins: 0 };
-    if (!room.game && room.seats[0] && room.seats[1]) this.startGame(room);
-    return { ok: true, room, seat: free as Seat, token: newToken, reconnected: false };
+    if (room.game) return { ok: false, error: 'GAME_IN_PROGRESS' };
+    if (room.seats.length >= MAX_PLAYERS) return { ok: false, error: 'ROOM_FULL' };
+    const seat = this.newSeat(profile, socketId);
+    room.seats.push(seat);
+    // Mesa completa: empieza sola
+    if (room.seats.length === MAX_PLAYERS) this.startGame(room);
+    return { ok: true, room, seat: room.seats.length - 1, token: seat.token, reconnected: false };
+  }
+
+  /** El anfitrión (o cualquiera si el anfitrión no está) empieza la partida con 2 a 4 jugadores. */
+  start(room: Room, seat: Seat): { ok: true } | { ok: false; error: RoomErrorCode } {
+    if (room.game) return { ok: false, error: 'GAME_IN_PROGRESS' };
+    const hostAway = !room.seats[room.host]?.socketId;
+    if (seat !== room.host && !hostAway) return { ok: false, error: 'NOT_HOST' };
+    if (room.seats.length < MIN_PLAYERS) return { ok: false, error: 'NOT_ENOUGH_PLAYERS' };
+    this.startGame(room);
+    return { ok: true };
   }
 
   startGame(room: Room) {
+    const n = room.seats.length;
     // Alterna quién empieza en cada partida (la primera se sortea)
-    const first: Seat = room.gamesPlayed === 0 ? (this.rand() < 0.5 ? 0 : 1) : ((room.gamesPlayed % 2) as Seat);
-    room.game = createGame({ turnSeconds: room.settings.turnSeconds, firstPlayer: first, now: this.now() });
-    room.rematch = [false, false];
+    const first: Seat = room.gamesPlayed === 0 ? Math.floor(this.rand() * n) : room.gamesPlayed % n;
+    room.game = createGame({ players: n, turnSeconds: room.settings.turnSeconds, firstPlayer: first, now: this.now() });
+    room.rematch = new Array<boolean>(n).fill(false);
     room.counted = false;
+    room.botPlan = null;
     room.gamesPlayed++;
+  }
+
+  /** Humanos que siguen en la partida (no reemplazados por el bot). */
+  humans(room: Room): number {
+    return room.seats.filter((s) => !s.replaced).length;
   }
 
   /** Marca el socket como desconectado. Devuelve la sala afectada. */
@@ -153,22 +209,44 @@ export class RoomManager {
     const s = room?.seats[seat];
     if (!room || !s || s.socketId !== socketId) return null;
     s.socketId = null;
+    s.disconnectedAt = this.now();
     room.lastActivity = this.now();
     return room;
   }
 
-  /** Salida voluntaria. En la sala de espera, si sale el creador se cierra la sala. */
+  /**
+   * Salida voluntaria.
+   *  - En la sala de espera: se libera el asiento (y el anfitrión pasa al siguiente).
+   *  - En partida: el bot toma su lugar. Si queda un solo humano, la partida termina.
+   */
   leave(code: string, seat: Seat, socketId: string): { room: Room; closed: boolean } | null {
-    const room = this.disconnect(code, seat, socketId);
-    if (!room) return null;
+    const room = this.rooms.get(code);
+    const s = room?.seats[seat];
+    if (!room || !s || s.socketId !== socketId) return null;
+    room.lastActivity = this.now();
     if (!room.game) {
+      room.seats.splice(seat, 1);
+      if (room.host > seat) room.host--;
+      if (room.host >= room.seats.length) room.host = 0;
+      if (room.seats.length === 0) {
+        this.rooms.delete(code);
+        return { room, closed: true };
+      }
+      return { room, closed: false };
+    }
+    s.socketId = null;
+    s.disconnectedAt = this.now();
+    s.replaced = true;
+    if (room.game.status === 'playing' && this.humans(room) <= 1) {
+      forceFinish(room.game);
+      this.countResult(room);
+    }
+    if (room.game.status === 'ended') this.checkRematch(room);
+    if (room.seats.every((x) => !x.socketId)) {
       this.rooms.delete(code);
       return { room, closed: true };
     }
-    if (room.seats.every((s) => !s?.socketId)) {
-      this.rooms.delete(code);
-      return { room, closed: true };
-    }
+    if (seat === room.host) room.host = Math.max(0, room.seats.findIndex((x) => x.socketId && !x.replaced));
     return { room, closed: false };
   }
 
@@ -182,31 +260,92 @@ export class RoomManager {
     return r;
   }
 
-  /** Aplica el timeout si corresponde. */
+  /** Timeout del turno o jugador ausente demasiado tiempo. Devuelve true si cambió algo. */
   tick(room: Room): boolean {
-    if (!room.game) return false;
-    const changed = checkTimeout(room.game, this.now());
+    const g = room.game;
+    if (!g || g.status !== 'playing') return false;
+    let changed = checkTimeout(g, this.now());
+    if (!changed && g.turnDeadline === null) {
+      const s = room.seats[g.turn];
+      if (s && !s.replaced && !s.socketId && s.disconnectedAt !== null && this.now() - s.disconnectedAt > ABSENT_TURN_MS) {
+        changed = forceDraw(g, this.now());
+      }
+    }
     if (changed) this.countResult(room);
     return changed;
+  }
+
+  /** ¿Le toca al bot sustituto? */
+  isBotTurn(room: Room): boolean {
+    const g = room.game;
+    return !!g && g.status === 'playing' && !!room.seats[g.turn]?.replaced;
+  }
+
+  /**
+   * Avanza un paso del bot sustituto (un movimiento o el fin de turno).
+   * Devuelve true si cambió el estado.
+   */
+  botStep(room: Room): boolean {
+    const g = room.game;
+    if (!g || !this.isBotTurn(room)) return false;
+    const key = `${g.eventSeq}:${g.turn}`;
+    if (!room.botPlan || room.botPlan.key !== key) {
+      // Planificar desde el inicio del turno (por si quedó algo a medias)
+      if (g.history.length) applyIntent(g, g.turn, { type: 'reset' }, this.now());
+      const plan = planBotTurn(turnContext(g));
+      room.botPlan = { key, moves: [...plan.moves], play: plan.play };
+    }
+    const plan = room.botPlan;
+    const m = plan.moves.shift();
+    if (m) {
+      const intent = botMoveToIntent(m, g.working.table);
+      if (intent) applyIntent(g, g.turn, intent, this.now());
+      return true;
+    }
+    const r = applyIntent(g, g.turn, { type: plan.play ? 'endTurn' : 'draw' }, this.now());
+    if (!r.ok) applyIntent(g, g.turn, { type: 'draw' }, this.now());
+    room.botPlan = null;
+    this.countResult(room);
+    return true;
   }
 
   private countResult(room: Room) {
     const g = room.game;
     if (!g || g.status !== 'ended' || room.counted) return;
     room.counted = true;
-    const w = g.result?.winner;
-    if (w !== null && w !== undefined) room.seats[w]!.wins++;
+    for (const w of g.result?.winners ?? []) {
+      const s = room.seats[w];
+      if (s) s.wins++;
+    }
+  }
+
+  /** Jugadores que cuentan para la revancha: humanos conectados. */
+  private rematchVoters(room: Room): number[] {
+    return room.seats.map((s, i) => (s.socketId && !s.replaced ? i : -1)).filter((i) => i >= 0);
   }
 
   rematch(room: Room, seat: Seat): boolean {
     if (!room.game || room.game.status !== 'ended') return false;
     room.rematch[seat] = true;
     room.lastActivity = this.now();
-    if (room.rematch[0] && room.rematch[1]) {
-      this.startGame(room);
-      return true;
-    }
+    this.checkRematch(room);
     return true;
+  }
+
+  /** Si todos los humanos conectados aceptaron, empieza la revancha solo con ellos. */
+  private checkRematch(room: Room) {
+    const voters = this.rematchVoters(room);
+    if (voters.length === 0 || !voters.every((i) => room.rematch[i])) return;
+    const keep = room.seats.filter((_, i) => voters.includes(i));
+    const hostToken = room.seats[room.host]?.token;
+    room.seats = keep;
+    room.host = Math.max(0, keep.findIndex((s) => s.token === hostToken));
+    if (keep.length >= MIN_PLAYERS) this.startGame(room);
+    else {
+      // No alcanza para jugar: volver a la sala de espera para que entre más gente
+      room.game = null;
+      room.rematch = [];
+    }
   }
 
   /** Filtra el arrastre: solo se revela el id si la ficha ya está en la mesa. */
@@ -221,21 +360,20 @@ export class RoomManager {
   }
 
   view(room: Room, seat: Seat): PlayerView {
-    const players = [0, 1].map((i) => {
-      const s = room.seats[i];
-      return {
-        name: s?.name ?? '',
-        avatar: s?.avatar ?? '',
-        connected: !!s?.socketId,
-        isBot: false,
-        wins: s?.wins ?? 0,
-      };
-    }) as ViewMeta['players'];
+    const players: ViewMeta['players'] = room.seats.map((s) => ({
+      name: s.name,
+      avatar: s.avatar,
+      connected: !!s.socketId || s.replaced,
+      isBot: s.replaced,
+      replaced: s.replaced,
+      wins: s.wins,
+    }));
     if (!room.game) {
       return {
         roomCode: room.code,
         you: seat,
-        players: players.map((p) => ({ ...p, rackCount: 0, opened: false })) as PlayerView['players'],
+        players: players.map((p) => ({ ...p, rackCount: 0, opened: false })),
+        host: room.host,
         rack: [],
         table: [],
         poolCount: 0,
@@ -249,12 +387,12 @@ export class RoomManager {
         turnStartTable: [],
         lastEvent: null,
         result: null,
-        rematch: [false, false],
+        rematch: [],
         version: 0,
         nextMeldSeq: 1,
       };
     }
-    return viewFor(room.game, seat, { roomCode: room.code, players, rematch: [...room.rematch], now: this.now() });
+    return viewFor(room.game, seat, { roomCode: room.code, players, rematch: [...room.rematch], host: room.host, now: this.now() });
   }
 
   /** Elimina salas inactivas. Devuelve los códigos eliminados. */
@@ -262,7 +400,7 @@ export class RoomManager {
     const now = this.now();
     const out: string[] = [];
     for (const [code, room] of this.rooms) {
-      const anyone = room.seats.some((s) => s?.socketId);
+      const anyone = room.seats.some((s) => s.socketId);
       const idle = now - room.lastActivity;
       if ((!anyone && idle > maxIdleMs) || (!room.game && now - room.createdAt > maxWaitingMs) || idle > 6 * 60 * 60_000) {
         this.rooms.delete(code);

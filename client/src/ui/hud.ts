@@ -4,6 +4,7 @@ import type { GameController } from '../game/controller';
 import { onLangChange, t } from '../i18n';
 import { settings, updateSettings } from '../settings';
 import type { BoardScene } from '../three/board';
+import { opponentsForHud } from '../game/seats';
 import { $, closeAllModals, escapeHtml, hasOpenModal, modal, toast, type Modal } from './dom';
 
 export interface HudOptions {
@@ -29,6 +30,7 @@ export class GameHud {
   private endModal: Modal | null = null;
   private lastTurnMine: boolean | null = null;
   private chatOpen = false;
+  private replacedSeen = new Set<number>();
 
   constructor(private ctl: GameController, private board: BoardScene, private opts: HudOptions) {
     this.root.hidden = false;
@@ -37,7 +39,7 @@ export class GameHud {
       ctl.em.on('change', (v) => this.update(v)),
       ctl.em.on('error', (c) => this.onError(c)),
       ctl.em.on('gameEvent', (e, v) => this.onGameEvent(e, v)),
-      tr.on('emote', (e) => this.floatEmoji(e.emoji, e.from === ctl.view?.you)),
+      tr.on('emote', (e) => this.floatEmoji(e.emoji, e.from)),
       tr.on('chat', (m) => this.onChat(m)),
       onLangChange(() => this.ctl.view && this.update(this.ctl.view)),
     );
@@ -114,8 +116,14 @@ export class GameHud {
     const landscapeShort = window.innerWidth > window.innerHeight && window.innerHeight < 560;
     const actions = $('actions');
     const bottom = landscapeShort ? 0 : actions.getBoundingClientRect().height;
-    const right = landscapeShort ? actions.getBoundingClientRect().width + 8 : 0;
-    this.board.setInsets({ top, bottom, right, safeBottom: safeBottomPx() });
+    // Las columnas de botones laterales no deben tapar a los rivales sentados a los lados
+    const w = window.innerWidth;
+    const leftTools = $('hud').querySelector<HTMLElement>('.side-tools:not(.right)')!.getBoundingClientRect();
+    const rightTools = $('hud').querySelector<HTMLElement>('.side-tools.right')!.getBoundingClientRect();
+    const left = leftTools.width ? leftTools.right + 4 : 0;
+    const rightEdge = Math.min(rightTools.width ? rightTools.left : w, landscapeShort ? actions.getBoundingClientRect().left : w);
+    const right = Math.max(0, w - rightEdge + 4);
+    this.board.setInsets({ top, bottom, right, left, safeBottom: safeBottomPx() });
     document.documentElement.style.setProperty('--rack-h', `${this.board.rackH}px`);
     this.updateRackArrows();
   };
@@ -182,10 +190,17 @@ export class GameHud {
 
   private onChat(m: ChatMessage) {
     const mine = m.from === this.ctl.view?.you;
+    const who = this.ctl.view?.players[m.from];
     const log = $('chat-log');
     const div = document.createElement('div');
     if (mine) div.className = 'me';
-    div.textContent = m.text;
+    else if (who) {
+      const name = document.createElement('span');
+      name.className = 'who';
+      name.textContent = `${who.avatar} ${who.name}`;
+      div.appendChild(name);
+    }
+    div.appendChild(document.createTextNode(m.text));
     log.appendChild(div);
     while (log.children.length > 50) log.firstElementChild?.remove();
     log.scrollTop = log.scrollHeight;
@@ -193,29 +208,40 @@ export class GameHud {
       sfx.pop();
       if (!this.chatOpen) {
         $('chat-badge').hidden = false;
-        this.floatBubble(m.text);
+        this.floatBubble(who ? `${who.avatar} ${m.text}` : m.text, m.from);
       }
     }
   }
 
-  private floatEmoji(emoji: string, mine: boolean) {
+  /** Posición en pantalla de la ficha (chip) de un rival en el HUD. */
+  private chipPos(seat: number): { left: string; top: string } | null {
+    const chip = $('opps').querySelector<HTMLElement>(`[data-seat="${seat}"]`);
+    if (!chip) return null;
+    const r = chip.getBoundingClientRect();
+    return { left: `${Math.max(4, r.left + 4)}px`, top: `${r.bottom + 6}px` };
+  }
+
+  private floatEmoji(emoji: string, from: number) {
+    const mine = from === this.ctl.view?.you;
     const el = document.createElement('div');
     el.className = 'floater';
     el.textContent = emoji;
-    el.style.left = `${mine ? 60 + Math.random() * 25 : 15 + Math.random() * 25}%`;
-    el.style.top = mine ? `calc(100% - var(--rack-h) - var(--actions-h) - 90px)` : `calc(var(--hud-h) + 40px)`;
+    const pos = mine ? null : this.chipPos(from);
+    el.style.left = pos?.left ?? `${mine ? 60 + Math.random() * 25 : 15 + Math.random() * 25}%`;
+    el.style.top = pos?.top ?? (mine ? `calc(100% - var(--rack-h) - var(--actions-h) - 90px)` : `calc(var(--hud-h) + 40px)`);
     $('floaters').appendChild(el);
     sfx.pop();
     vibrate(10);
     setTimeout(() => el.remove(), 2300);
   }
 
-  private floatBubble(text: string) {
+  private floatBubble(text: string, from: number) {
     const el = document.createElement('div');
     el.className = 'floater bubble';
     el.textContent = text;
-    el.style.left = '12px';
-    el.style.top = `calc(var(--hud-h) + 50px)`;
+    const pos = this.chipPos(from);
+    el.style.left = pos?.left ?? '12px';
+    el.style.top = pos?.top ?? `calc(var(--hud-h) + 50px)`;
     $('floaters').appendChild(el);
     setTimeout(() => el.remove(), 2300);
   }
@@ -228,12 +254,13 @@ export class GameHud {
   }
 
   private onGameEvent(e: GameEvent, v: PlayerView) {
-    const oppName = v.players[1 - v.you]!.name;
+    const oppName = 'player' in e ? (v.players[e.player]?.name ?? '') : '';
     switch (e.type) {
       case 'draw':
         sfx.draw();
         if (e.player === v.you && e.timeout) toast(t('game.timeout'), 'error');
-        else if (e.player !== v.you) toast(t('game.drew', { name: oppName }));
+        // Con más de 2 jugadores el contador de cada rival ya lo muestra (evita llenar la mesa de avisos)
+        else if (e.player !== v.you && v.players.length === 2) toast(t('game.drew', { name: oppName }));
         break;
       case 'play':
         if (e.player !== v.you) toast(t(e.tiles.length === 1 ? 'game.played1' : 'game.played', { name: oppName, n: e.tiles.length }));
@@ -251,21 +278,17 @@ export class GameHud {
   update(v: PlayerView) {
     this.clockOffset = v.serverNow - Date.now();
     const me = v.players[v.you]!;
-    const opp = v.players[1 - v.you]!;
     const mine = v.status === 'playing' && v.turn === v.you;
-    $('opp-avatar').textContent = opp.avatar;
-    $('opp-name').textContent = opp.name;
-    $('opp-count').textContent = String(opp.rackCount);
-    $('opp-dot').classList.toggle('off', !opp.connected);
-    $('opp').classList.toggle('active', v.status === 'playing' && !mine);
-    $('opp-status').textContent = !opp.connected
-      ? `· ${t('hud.disconnected')}`
-      : opp.isBot && v.status === 'playing' && !mine
-        ? `· ${t('hud.botThinking')}`
-        : '';
+    this.renderOpponents(v);
+    // Avisar cuando alguien abandona y el bot toma su lugar
+    v.players.forEach((p, i) => {
+      if (p.replaced && !this.replacedSeen.has(i) && v.status === 'playing') toast(t('game.replaced', { name: p.name }));
+      if (p.replaced) this.replacedSeen.add(i);
+      else this.replacedSeen.delete(i);
+    });
     $('pool-count').textContent = String(v.poolCount);
     const label = $('turn-label');
-    label.textContent = v.status === 'playing' ? (mine ? t('hud.yourTurn') : t('hud.theirTurn', { name: opp.name })) : '';
+    label.textContent = v.status === 'playing' ? (mine ? t('hud.yourTurn') : t('hud.theirTurn', { name: v.players[v.turn]?.name ?? '' })) : '';
     label.hidden = v.status !== 'playing';
     label.classList.toggle('mine', mine);
     $('turn').classList.toggle('mine', mine);
@@ -329,32 +352,68 @@ export class GameHud {
     wrap.classList.toggle('urgent', urgent);
   }
 
+  /** Fichas compactas de los rivales, en el mismo orden que en la mesa (izquierda, enfrente, derecha). */
+  private renderOpponents(v: PlayerView) {
+    const opps = opponentsForHud(v);
+    const box = $('opps');
+    box.classList.toggle('many', opps.length >= 3);
+    box.innerHTML = opps
+      .map(({ seat }) => {
+        const p = v.players[seat]!;
+        const active = v.status === 'playing' && v.turn === seat;
+        const status = p.replaced
+          ? `🤖 ${t('hud.replaced')}`
+          : !p.connected
+            ? t('hud.disconnected')
+            : p.isBot && active
+              ? t('hud.botThinking')
+              : '';
+        return `<div class="opp ${active ? 'active' : ''} ${p.replaced ? 'left-game' : ''}" data-seat="${seat}">
+          <span class="avatar">${escapeHtml(p.avatar)}<i class="dot ${p.connected ? '' : 'off'}"></i></span>
+          <div class="opp-info">
+            <div class="opp-name">${escapeHtml(p.name)}</div>
+            <div class="opp-sub"><b>${p.rackCount}</b> ${t('hud.tiles')}${status ? `<span class="opp-status">· ${escapeHtml(status)}</span>` : ''}</div>
+          </div>
+        </div>`;
+      })
+      .join('');
+  }
+
   private showEnd(v: PlayerView) {
     const r = v.result!;
-    const me = v.players[v.you]!;
-    const opp = v.players[1 - v.you]!;
-    const won = r.winner === v.you;
-    const draw = r.winner === null;
-    const title = draw ? t('end.draw') : won ? t('end.win') : t('end.lose');
-    const reason =
-      r.reason === 'out' ? t('end.reasonOut', { name: escapeHtml(r.winner === v.you ? me.name : opp.name) }) : t('end.reasonPool');
-    const askedByOpp = v.rematch[1 - v.you] && !v.rematch[v.you];
-    const iAsked = v.rematch[v.you];
+    const won = r.winners.includes(v.you);
+    const shared = r.winners.length > 1;
+    const title = won ? (shared ? t('end.sharedWin') : t('end.win')) : t('end.lose');
+    const winnerNames = r.winners.map((w) => escapeHtml(v.players[w]?.name ?? '')).join(', ');
+    const reason = r.reason === 'out' ? t('end.reasonOut', { name: winnerNames }) : t('end.reasonPool');
+    // Ranking: menos puntos primero
+    const order = v.players.map((_, i) => i).sort((a, b) => r.points[a]! - r.points[b]! || a - b);
+    const rows = order
+      .map((seat, i) => {
+        const p = v.players[seat]!;
+        const cls = [r.winners.includes(seat) ? 'win' : '', seat === v.you ? 'me' : ''].join(' ');
+        return `<li class="${cls}"><span class="pos">${r.winners.includes(seat) ? '🏆' : i + 1}</span>
+          <span class="nm">${escapeHtml(p.avatar)} ${escapeHtml(p.name)}${p.replaced ? ' 🤖' : ''}</span>
+          <span class="pts">${r.points[seat]}</span><span class="wins">${p.wins} ✓</span></li>`;
+      })
+      .join('');
+    const voters = v.players.map((p, i) => (p.connected && !p.replaced && !p.isBot ? i : -1)).filter((i) => i >= 0);
+    const yes = voters.filter((i) => v.rematch[i]).length;
+    const iAsked = !!v.rematch[v.you];
+    const asked = voters.filter((i) => i !== v.you && v.rematch[i]).map((i) => escapeHtml(v.players[i]!.name));
     const html = `
       <div class="end-card">
-        <div style="font-size:54px">${draw ? '🤝' : won ? '🏆' : '😔'}</div>
+        <div style="font-size:54px">${won ? '🏆' : '😔'}</div>
         <div class="end-title ${won ? 'win' : ''}">${title}</div>
         <p class="muted">${reason}</p>
-        <p class="muted" style="margin:14px 0 4px">${t('end.points')}</p>
-        <div class="end-scores">
-          <div>${escapeHtml(me.avatar)} ${escapeHtml(me.name)}<b>${r.points[v.you]}</b></div>
-          <div>${escapeHtml(opp.avatar)} ${escapeHtml(opp.name)}<b>${r.points[1 - v.you]}</b></div>
-        </div>
-        <p class="muted">${t('end.score')}: <b style="color:var(--gold)">${me.wins} – ${opp.wins}</b></p>
-        ${askedByOpp ? `<p style="color:var(--gold)">${t('end.rematchAsked', { name: escapeHtml(opp.name) })}</p>` : ''}
+        <ol class="rank">${rows}</ol>
+        <p class="muted" style="font-size:12px;margin:0 0 6px">${t('end.points')} · ✓ = ${t('end.score')}</p>
+        ${asked.length && !iAsked ? `<p style="color:var(--gold)">${t('end.rematchAsked', { name: asked.join(', ') })}</p>` : ''}
         <div class="actions-row">
           <button class="btn" id="end-menu">${t('end.menu')}</button>
-          <button class="btn btn-gold" id="end-rematch" ${iAsked ? 'disabled' : ''}>${iAsked ? t('end.rematchWaiting') : t('end.rematch')}</button>
+          <button class="btn btn-gold" id="end-rematch" ${iAsked ? 'disabled' : ''}>${
+            iAsked ? `${t('end.rematchWaiting')} ${yes}/${voters.length}` : `${t('end.rematch')}${voters.length > 2 ? ` ${yes}/${voters.length}` : ''}`
+          }</button>
         </div>
       </div>`;
     const first = !this.endModal;
@@ -373,7 +432,7 @@ export class GameHud {
         sfx.win();
         vibrate([30, 50, 30, 50, 80]);
         this.board.celebrate();
-      } else if (!draw) sfx.lose();
+      } else sfx.lose();
     }
   }
 

@@ -152,10 +152,11 @@ describe('openingPoints', () => {
 
 describe('scoring', () => {
   it('gana quien se queda sin fichas', () => {
-    expect(scoring([[], [R(5)]])).toEqual({ points: [0, 5], winner: 0 });
+    expect(scoring([[], [R(5)]])).toEqual({ points: [0, 5], winners: [0] });
   });
-  it('pozo agotado: menos puntos gana; comodín = 30; empate = null', () => {
-    expect(scoring([[J1], [R(13), B(13)]])).toEqual({ points: [30, 26], winner: 1 });
-    expect(scoring([[R(3)], [B(3)]]).winner).toBeNull();
+  it('pozo agotado: menos puntos gana; comodín = 30; empates = varios ganadores', () => {
+    expect(scoring([[J1], [R(13), B(13)]])).toEqual({ points: [30, 26], winners: [1] });
+    expect(scoring([[R(3)], [B(3)]]).winners).toEqual([0, 1]);
+    expect(scoring([[R(9)], [K(3)], [O(3)], [B(1)]]).winners).toEqual([3]);
   });
 });

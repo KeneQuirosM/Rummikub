@@ -1,12 +1,14 @@
 # Rummi 3D 🀄
 
-Rummy de fichas (estilo Rummikub) en **3D** para jugar **1 vs 1 con un amigo** desde el celular o la computadora.
-Creas una sala, compartes el link por WhatsApp y tu amigo entra con un toque. Sin registro y sin instalar nada
+Rummy de fichas (estilo Rummikub) en **3D** para jugar **de 2 a 4 jugadores** desde el celular o la computadora.
+Creas una sala, compartes el link por WhatsApp y tus amigos entran con un toque; el anfitrión toca **Empezar**
+(con 4 jugadores la partida empieza sola). Sin registro y sin instalar nada
 (aunque se puede "instalar" como PWA).
 
 - Mesa de fieltro con borde de madera, fichas biseladas con numeral grabado, sombras de contacto, animaciones GSAP y sonido sintetizado.
 - Motor de reglas **100 % en el servidor**, compartido con el cliente para predicción instantánea.
-- Modo práctica contra un **bot** (backtracking + manipulación de mesa) que funciona sin conexión.
+- Modo práctica contra **1 a 3 bots** (backtracking + manipulación de mesa) que funciona sin conexión.
+- Si alguien abandona a mitad de partida, **un bot toma su lugar** y la mesa sigue.
 - Móvil primero: portrait y landscape, arrastrar y soltar o *tocar y tocar*, safe areas, Wake Lock y pantalla completa.
 
 ---
@@ -35,7 +37,7 @@ Abre http://localhost:5173 en dos pestañas (o una normal y una de incógnito) p
 
 1. Ejecuta `npm run dev`. Vite imprime una línea `Network: http://192.168.x.y:5173/`.
 2. Abre esa URL en el celular (misma WiFi). Como el cliente usa el proxy de Vite, el WebSocket va al mismo origen y no hay que configurar nada más.
-3. Crea una sala en el celular y comparte el link: tu amigo (en la misma red) entra directo.
+3. Crea una sala en el celular y comparte el link: tus amigos (en la misma red) entran directo. Con 2 o más en la sala, el anfitrión toca **Empezar**.
 4. Si no carga: revisa que el firewall del PC permita los puertos 5173/3001.
 
 > Nota: Web Share, Wake Lock y el Service Worker requieren HTTPS fuera de `localhost`. En la LAN funcionan con
@@ -111,7 +113,24 @@ Detalle del modelo de estado y del protocolo en [`docs/ARCHITECTURE.md`](docs/AR
   *ack* del servidor aplica el estado autoritativo (si algo se rechazó, la vista se corrige sola).
 - **Reconexión**: al crear/unirse se entrega un token de sesión (guardado en `localStorage` por sala). Socket.IO reconecta
   solo y el cliente reenvía `room:join` con el token: recupera el asiento y el atril. El rival ve "desconectado" mientras tanto.
-- **Práctica**: `LocalTransport` ejecuta el mismo `GameState` en el navegador con el bot como rival (misma interfaz `Transport` que el online).
+- **Práctica**: `LocalTransport` ejecuta el mismo `GameState` en el navegador con 1 a 3 bots como rivales (misma interfaz `Transport` que el online).
+
+### Partidas de 2 a 4 jugadores
+
+- **Sala de espera**: muestra los asientos (hasta 4) y quién es el anfitrión 👑. El anfitrión empieza con 2–4; con 4 empieza sola.
+  Si el anfitrión sale de la espera, el siguiente pasa a serlo. Una vez empezada la partida no entra nadie nuevo
+  (`GAME_IN_PROGRESS`), salvo quien vuelve con su token.
+- **Turnos**: rotan en sentido horario (`(asiento + 1) % n`). Cada jugador recibe 14 fichas (con 4 quedan 50 en el pozo).
+- **Mesa 3D**: tú siempre abajo; los rivales se sientan alrededor en orden de turno — 2 jugadores: enfrente;
+  3: izquierda y derecha; 4: izquierda, enfrente y derecha. Sus atriles son fichas boca abajo en cada borde y el del
+  jugador en turno brilla en dorado. Las fichas jugadas por un rival vuelan desde su lado de la mesa.
+- **HUD**: una ficha compacta por rival (avatar, fichas, conexión) en el mismo orden que en la mesa; pozo, reacciones y
+  chat en la columna derecha. El encuadre de la cámara reserva el espacio de esas columnas.
+- **Abandono**: si alguien toca "Salir" en plena partida, el servidor marca su asiento como `replaced` y un bot juega por él
+  (los demás lo ven con 🤖). Si vuelve con su token, recupera el asiento. Si queda un solo humano, la partida termina.
+- **Desconexión**: se le espera; sin límite de tiempo, si está desconectado más de 60 s en su turno roba automáticamente.
+- **Fin**: ranking por puntos de todos los jugadores; con el pozo agotado puede haber varios ganadores empatados.
+- **Revancha**: votan todos los humanos conectados; los que se fueron no entran. Si quedan menos de 2, la sala vuelve a la espera.
 
 ### ¿Por qué Socket.IO y no Colyseus?
 
@@ -136,7 +155,7 @@ cliente pequeño (~14 KB gzip) y sin acoplar el modelo de datos a un framework. 
 ### Decisiones tomadas ante ambigüedades
 
 - **Robar con jugadas en curso**: "Robar" revierte lo movido en el turno y roba. "Terminar" sin fichas jugadas equivale a robar.
-- **Pozo agotado**: la partida termina cuando a alguien le toca robar y no quedan fichas; gana el de menos puntos; si empatan, es empate.
+- **Pozo agotado**: la partida termina cuando a alguien le toca robar y no quedan fichas; gana el de menos puntos; si empatan varios, todos ganan.
 - **Grupo vs escalera ambiguos** (p. ej. `5 + J + J`): se valora con la interpretación de mayor puntaje.
 - **Orden dentro de una combinación**: se respeta el orden del jugador si es válido; si no, las escaleras se ordenan solas y los comodines rellenan huecos.
 - **Dividir**: sacar una ficha del interior de una escalera válida la parte en dos combinaciones.
@@ -145,7 +164,7 @@ cliente pequeño (~14 KB gzip) y sin acoplar el modelo de datos a un framework. 
 - **Revancha**: requiere que ambos acepten; se alterna quién empieza. El marcador de victorias se mantiene en la sala.
 - **Profundidad de campo**: se omitió (coste de post-procesado alto en gama media); la sensación de profundidad viene de la
   perspectiva, niebla y viñeta CSS.
-- **Salas en memoria**: un único proceso de servidor (suficiente para 1 vs 1). Para escalar horizontalmente habría que añadir
+- **Salas en memoria**: un único proceso de servidor (suficiente para cientos de mesas de 2 a 4). Para escalar horizontalmente habría que añadir
   el adaptador Redis de Socket.IO y mover las salas a Redis.
 
 ---

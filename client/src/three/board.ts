@@ -11,6 +11,7 @@ import { Confetti } from './effects';
 import { TableEnvironment } from './environment';
 import { findDropTarget, layoutTable, STEP, type DropTarget, type TableLayout } from './layout';
 import { BACK_CELL, cellOf, createWoodTexture } from './textures';
+import { opponentSeats } from '../game/seats';
 import { TILE_D, TILE_H, TILE_W, TileSet, type TileState } from './tileset';
 
 export interface BoardCallbacks {
@@ -28,8 +29,10 @@ export interface BoardInsets {
   bottom: number;
   /** safe-area inferior */
   safeBottom: number;
-  /** px tapados a la derecha (barra de acciones en landscape) */
+  /** px tapados a la derecha (botones laterales / barra de acciones en landscape) */
   right: number;
+  /** px tapados a la izquierda (botones laterales) */
+  left: number;
 }
 
 type Loc = 'table' | 'rack' | 'none';
@@ -55,6 +58,12 @@ const LIFT = 0.85;
 const JITTER = (id: number) => ((((id * 2654435761) >>> 0) % 1000) / 1000 - 0.5) * 0.03;
 
 const RACK_RX = Math.PI / 2 - 0.3;
+/** Dorsos visibles por rival y montones del pozo (capacidad del InstancedMesh de dorsos). */
+const BACKS_PER_OPP = 30;
+const POOL_PILES = 12;
+const BACK_SCALE = 0.62;
+const BACK_STEP = BACK_SCALE * TILE_W + 0.06;
+const TINT_ACTIVE = [1.3, 1.12, 0.62] as const;
 
 const TINT_NORMAL = [1, 1, 1] as const;
 const TINT_PLAYED = [1.0, 0.95, 0.82] as const;
@@ -89,7 +98,7 @@ export class BoardScene implements EngineScene {
   private rackGap = 5;
   private perRow = 8;
   private scrollX = 0;
-  private insets: BoardInsets = { top: 64, bottom: 64, safeBottom: 0, right: 0 };
+  private insets: BoardInsets = { top: 64, bottom: 64, safeBottom: 0, right: 0, left: 0 };
 
   view: PlayerView | null = null;
   private rackOrder: TileId[] = [];
@@ -118,7 +127,7 @@ export class BoardScene implements EngineScene {
     this.scene.add(this.env.group);
 
     this.tiles = new TileSet(106, res, true);
-    this.backs = new TileSet(48, res, true);
+    this.backs = new TileSet(BACKS_PER_OPP * 3 + POOL_PILES, res, true);
     // Fantasma translúcido para el arrastre del rival
     const gBody = res.bodyMat.clone();
     gBody.transparent = true;
@@ -234,17 +243,15 @@ export class BoardScene implements EngineScene {
    * conviene ensanchar las filas en vez de apilar una columna altísima de combinaciones.
    */
   private chooseRowWidth(view: PlayerView): number {
-    const usableW = Math.max(80, this.w - this.insets.right);
-    const usableH = Math.max(80, this.mainH - this.insets.top - this.insets.bottom);
+    // Coste = distancia de cámara necesaria (menor = fichas más grandes en pantalla)
     const cost = (rw: number) => {
       const L = layoutTable(view.table, rw);
-      const width = Math.max(L.maxX - L.minX, rw) + 1;
-      const depth = (L.maxZ - L.minZ + 3.5) * Math.sin(EL);
-      return Math.max(width / usableW, depth / usableH);
+      return this.computeFit(L, rw, this.backsExtents(view, L, rw)).dist;
     };
     let best = this.baseRowWidth;
     let bestCost = cost(best);
-    for (let rw = this.baseRowWidth + 1.6; rw <= 28; rw += 1.6) {
+    // Probar filas más angostas (rivales a los lados) y más anchas (mesa muy alta)
+    for (let rw = 7; rw <= 28; rw += 1.2) {
       const c = cost(rw);
       if (c < bestCost * 0.97) {
         best = rw;
@@ -252,7 +259,7 @@ export class BoardScene implements EngineScene {
       }
     }
     // Histéresis: mantener el ancho actual si es casi igual de bueno (evita que la mesa se reacomode sin parar)
-    if (this.rowWidth !== best && cost(this.rowWidth) <= bestCost * 1.08) return this.rowWidth;
+    if (this.rowWidth !== best && cost(this.rowWidth) <= bestCost * 1.06) return this.rowWidth;
     return best;
   }
 
@@ -260,44 +267,79 @@ export class BoardScene implements EngineScene {
     return Math.max(1, this.h - this.rackH);
   }
 
-  /** Encaja la cámara para ver todo el contenido (búsqueda binaria proyectando las esquinas). */
+  /** Encaja la cámara para ver todo el contenido. */
   fitCamera(animate = true) {
-    const L = this.layout;
-    const oppZ = this.opponentZ();
+    const fit = this.view
+      ? this.computeFit(this.layout, this.rowWidth, this.backsExtents(this.view, this.layout, this.rowWidth))
+      : { tx: 0, tz: 0, dist: 18 };
+    this.placeCamera(this.cam.tx, this.cam.tz, this.cam.dist);
+    if (animate) {
+      gsap.to(this.cam, { ...fit, duration: 0.5, ease: 'power2.inOut', onUpdate: () => this.applyCamera() });
+    } else {
+      Object.assign(this.cam, fit);
+      this.applyCamera();
+    }
+  }
+
+  /**
+   * Cámara que muestra toda la mesa (combinaciones + atriles rivales + pozo) dentro de la zona libre
+   * del HUD: búsqueda binaria de la distancia proyectando las esquinas. No mueve la cámara real.
+   */
+  private computeFit(L: TableLayout, rw: number, ext: { halfW: number; minZ: number; maxZ: number }): { tx: number; tz: number; dist: number } {
+    const oppZ = this.opponentZ(L);
     const minW = this.w < this.mainH ? 9 : 13;
-    const half = Math.max(minW / 2, -L.minX + 0.5, L.maxX + 0.5, this.rowWidth / 2 - 0.4);
+    const half = Math.max(minW / 2, -L.minX + 0.5, L.maxX + 0.5, rw / 2 - 0.4, ext.halfW);
     const minX = -half, maxX = half;
-    const minZ = Math.min(L.minZ, oppZ - 1.2) - 0.3;
-    const maxZ = Math.max(L.maxZ, 2.2) + 0.5;
+    const minZ = Math.min(L.minZ, oppZ - 1.2, ext.minZ) - 0.3;
+    const maxZ = Math.max(L.maxZ, 2.2, ext.maxZ) + 0.5;
     const tx = 0, tz = (minZ + maxZ) / 2;
-    const top = this.insets.top, bottom = this.insets.bottom, right = this.insets.right;
+    const { top, bottom, right, left } = this.insets;
     const corners = [
       [minX, minZ], [maxX, minZ], [minX, maxZ], [maxX, maxZ],
     ];
+    const saved = { ...this.cam };
     const fits = (dist: number) => {
       this.placeCamera(tx, tz, dist);
       for (const [x, z] of corners) {
         this.tmpV.set(x!, TILE_H, z!).project(this.camera);
         const sx = ((this.tmpV.x + 1) / 2) * this.w;
         const sy = ((1 - this.tmpV.y) / 2) * this.mainH;
-        if (sx < 6 || sx > this.w - right - 6 || sy < top || sy > this.mainH - bottom - 4) return false;
+        if (sx < left + 6 || sx > this.w - right - 6 || sy < top || sy > this.mainH - bottom - 4) return false;
       }
       return true;
     };
-    let lo = 5, hi = 90;
+    let lo = 5, hi = 120;
     for (let i = 0; i < 22; i++) {
       const mid = (lo + hi) / 2;
       if (fits(mid)) hi = mid;
       else lo = mid;
     }
-    const dist = hi;
-    this.placeCamera(this.cam.tx, this.cam.tz, this.cam.dist);
-    if (animate) {
-      gsap.to(this.cam, { tx, tz, dist, duration: 0.5, ease: 'power2.inOut', onUpdate: () => this.applyCamera() });
-    } else {
-      Object.assign(this.cam, { tx, tz, dist });
-      this.applyCamera();
+    this.placeCamera(saved.tx, saved.tz, saved.dist);
+    return { tx, tz, dist: hi };
+  }
+
+  /** Espacio que ocupan los atriles rivales para un layout dado (mismo cálculo que syncBacks). */
+  private backsExtents(view: PlayerView, L: TableLayout, rw: number): { halfW: number; minZ: number; maxZ: number } {
+    const topZ = this.opponentZ(L);
+    const cz = (L.minZ + L.maxZ) / 2;
+    const colLen = Math.max(5.5, L.maxZ - L.minZ + 1.5);
+    const sideX = this.contentHalfW(L, rw) + 1.4;
+    const lineDepth = TILE_D * BACK_SCALE + 0.08;
+    let halfW = 0, minZ = 0, maxZ = 0;
+    for (const o of opponentSeats(view)) {
+      const n = Math.min(view.players[o.seat]?.rackCount ?? 0, BACKS_PER_OPP);
+      if (n === 0) continue;
+      if (o.side === 'top') {
+        const perLine = Math.max(1, Math.floor(Math.max(5, rw - 3.2) / BACK_STEP));
+        minZ = Math.min(minZ, topZ - (Math.ceil(n / perLine) - 1) * lineDepth - 0.6);
+      } else {
+        const perLine = Math.max(1, Math.floor(colLen / BACK_STEP));
+        halfW = Math.max(halfW, sideX + (Math.ceil(n / perLine) - 1) * lineDepth + 0.7);
+        minZ = Math.min(minZ, cz - colLen / 2 - 0.3);
+        maxZ = Math.max(maxZ, cz + colLen / 2 + 0.3);
+      }
     }
+    return { halfW, minZ, maxZ };
   }
 
   recenter() {
@@ -306,11 +348,15 @@ export class BoardScene implements EngineScene {
   }
 
   private placeCamera(tx: number, tz: number, dist: number) {
+    // La niebla acompaña a la cámara: la mesa nunca se oscurece al alejarse
+    const fog = this.scene.fog as THREE.Fog;
+    fog.near = dist + 12;
+    fog.far = dist + 50;
     this.camera.position.set(tx, Math.sin(EL) * dist, tz + Math.cos(EL) * dist);
     this.camera.lookAt(tx, 0, tz);
     // Centrar el contenido en la zona libre entre el HUD superior y la barra inferior
     const shiftY = (this.insets.top - this.insets.bottom) / 2;
-    const shiftX = this.insets.right / 2;
+    const shiftX = (this.insets.right - this.insets.left) / 2;
     this.camera.setViewOffset(this.w, this.mainH, shiftX, -shiftY, this.w, this.mainH);
     this.camera.updateMatrixWorld();
   }
@@ -320,8 +366,24 @@ export class BoardScene implements EngineScene {
     this.engine.invalidate();
   }
 
-  private opponentZ() {
-    return Math.min(this.layout.minZ, -2.5) - 1.8;
+  private opponentZ(L: TableLayout = this.layout) {
+    return Math.min(L.minZ, -2.5) - 1.8;
+  }
+
+  /** Mitad del ancho ocupado por las combinaciones (sin rivales laterales). */
+  private contentHalfW(L: TableLayout = this.layout, rw = this.rowWidth) {
+    return Math.max(-L.minX, L.maxX, rw / 2 - 0.4, 3);
+  }
+
+  /** Punto de su lado de la mesa desde donde "salen" las fichas de un rival. */
+  private seatAnchor(seat: number): { x: number; z: number } {
+    const v = this.view;
+    const side = v ? opponentSeats(v).find((o) => o.seat === seat)?.side ?? 'top' : 'top';
+    const cz = (this.layout.minZ + this.layout.maxZ) / 2;
+    const sx = this.contentHalfW() + 1.4;
+    if (side === 'left') return { x: -sx, z: cz };
+    if (side === 'right') return { x: sx, z: cz };
+    return { x: -1.4, z: this.opponentZ() };
   }
 
   // ---------------------------------------------------------------- sync
@@ -343,8 +405,6 @@ export class BoardScene implements EngineScene {
     // No cambiar el ancho de filas mientras se arrastra (la mesa "saltaría" bajo el dedo)
     if (!this.drag?.started) this.rowWidth = this.chooseRowWidth(view);
     this.layout = layoutTable(view.table, this.rowWidth);
-    // La cámara nunca se mueve sola mientras se arrastra una ficha
-    if (!this.userCamera && !this.drag?.started) this.fitCamera(animate && !newGame);
 
     if (newGame) {
       this.loc.clear();
@@ -373,7 +433,11 @@ export class BoardScene implements EngineScene {
     if (glow.size && animate) sfx.valid();
 
     // Fichas de la mesa
-    const opp = this.opponentZ();
+    // Los atriles rivales primero: la cámara los necesita para encuadrar
+    this.syncBacks(view, animate);
+    // La cámara nunca se mueve sola mientras se arrastra una ficha
+    if (!this.userCamera && !this.drag?.started) this.fitCamera(animate && !newGame);
+    const from = this.seatAnchor(view.turn);
     let oppIdx = 0;
     for (const m of view.table) {
       const box = this.layout.melds.find((b) => b.id === m.id)!;
@@ -397,8 +461,8 @@ export class BoardScene implements EngineScene {
           this.tweenTile(this.tiles, t, target, animate ? 0.32 : 0, 'back.out(1.4)');
         } else {
           // Viene del atril rival: vuela desde su lado y se voltea
-          const fromX = (oppIdx++ - 1) * 0.6;
-          this.tiles.set(t, { x: fromX, y: 0.9, z: opp, rx: 0, ry: 0, rz: animate ? Math.PI : 0, s: 1, visible: true, cell: cellOf(t) });
+          const spread = (oppIdx++ - 1) * 0.6;
+          this.tiles.set(t, { x: from.x + spread, y: 0.9, z: from.z, rx: 0, ry: 0, rz: animate ? Math.PI : 0, s: 1, visible: true, cell: cellOf(t) });
           this.tweenTile(this.tiles, t, target, animate ? 0.6 : 0, 'power3.out', oppIdx * 0.06);
         }
       });
@@ -432,7 +496,6 @@ export class BoardScene implements EngineScene {
     this.loc = nextLoc;
     if (this.selected !== null && !nextLoc.has(this.selected)) this.select(null);
     this.refreshTints(glow);
-    this.syncBacks(view, animate);
     this.clampScroll();
     this.engine.invalidate();
   }
@@ -471,41 +534,61 @@ export class BoardScene implements EngineScene {
     }
   }
 
-  /** Atril rival (dorsos, boca abajo) y pozo. */
+  /**
+   * Atriles rivales (dorsos boca abajo) alrededor de la mesa y el pozo.
+   * Enfrente: fila arriba. Izquierda/derecha: columnas a los lados (fichas giradas 90°).
+   * El atril del jugador en turno brilla en dorado.
+   */
   private syncBacks(view: PlayerView, animate: boolean) {
-    const opp = view.players[1 - view.you]!;
-    const n = Math.min(opp.rackCount, 36);
-    const z = this.opponentZ();
-    const avail = Math.max(5, this.rowWidth - 3.2);
-    const scale = 0.62;
-    const sp = scale * TILE_W + 0.06;
-    const perRow = Math.max(1, Math.floor(avail / sp));
-    const cx = -1.4;
-    for (let i = 0; i < 36; i++) {
+    const L = this.layout;
+    const topZ = this.opponentZ();
+    const cz = (L.minZ + L.maxZ) / 2;
+    const colLen = Math.max(5.5, L.maxZ - L.minZ + 1.5);
+    const sideX = this.contentHalfW() + 1.4;
+    const used = new Set<number>();
+    opponentSeats(view).forEach((o, k) => {
+      const p = view.players[o.seat];
+      if (!p) return;
+      const n = Math.min(p.rackCount, BACKS_PER_OPP);
+      const base = k * BACKS_PER_OPP;
+      const active = view.status === 'playing' && view.turn === o.seat;
+      const [r, g, b] = active ? TINT_ACTIVE : TINT_NORMAL;
+      const perLine = o.side === 'top' ? Math.max(1, Math.floor(Math.max(5, this.rowWidth - 3.2) / BACK_STEP)) : Math.max(1, Math.floor(colLen / BACK_STEP));
+      for (let i = 0; i < n; i++) {
+        const line = Math.floor(i / perLine);
+        const inLine = Math.min(perLine, n - line * perLine);
+        const off = (i % perLine - (inLine - 1) / 2) * BACK_STEP;
+        const depth = line * (TILE_D * BACK_SCALE + 0.08);
+        let target: Partial<TileState>;
+        if (o.side === 'top') target = { x: -1.4 + off, z: topZ - depth, ry: 0 };
+        else if (o.side === 'left') target = { x: -sideX - depth, z: cz + off, ry: Math.PI / 2 };
+        else target = { x: sideX + depth, z: cz + off, ry: -Math.PI / 2 };
+        Object.assign(target, { y: (TILE_H / 2) * BACK_SCALE, rx: 0, rz: 0, s: BACK_SCALE, r, g, b });
+        const idx = base + i;
+        used.add(idx);
+        const st = this.backs.get(idx);
+        if (!st.visible) this.backs.set(idx, { ...target, y: 2, visible: true, cell: BACK_CELL, shadow: -1 });
+        this.tweenTile(this.backs, idx, target, animate ? 0.35 : 0, 'power2.out', animate ? i * 0.01 : 0);
+      }
+    });
+    for (let i = 0; i < BACKS_PER_OPP * 3; i++) {
       const st = this.backs.get(i);
-      if (i < n) {
-        const row = Math.floor(i / perRow);
-        const inRow = Math.min(perRow, n - row * perRow);
-        const col = i % perRow;
-        const target = { x: cx + (col - (inRow - 1) / 2) * sp, y: (TILE_H / 2) * scale, z: z - row * (TILE_D * scale + 0.08), rx: 0, ry: 0, rz: 0, s: scale };
-        if (!st.visible) this.backs.set(i, { ...target, y: 2, visible: true, cell: BACK_CELL, shadow: -1 });
-        this.tweenTile(this.backs, i, target, animate ? 0.35 : 0, 'power2.out', animate ? i * 0.01 : 0);
-      } else if (st.visible) {
+      if (!used.has(i) && st.visible) {
         gsap.killTweensOf(st);
         this.backs.set(i, { visible: false });
       }
     }
-    // Pozo: montones de fichas boca abajo a la derecha del atril rival
-    const piles = Math.min(12, Math.ceil(view.poolCount / 7));
+    // Pozo: montones de fichas boca abajo arriba a la derecha
+    const piles = Math.min(POOL_PILES, Math.ceil(view.poolCount / 7));
     const px = this.rowWidth / 2 - 1.2;
-    for (let i = 0; i < 12; i++) {
-      const idx = 36 + i;
+    for (let i = 0; i < POOL_PILES; i++) {
+      const idx = BACKS_PER_OPP * 3 + i;
       if (i < piles) {
         const col = i % 2, lvl = Math.floor(i / 2);
         this.backs.set(idx, {
           x: px + col * 0.75,
           y: (TILE_H / 2) * 0.7 + lvl * TILE_H * 0.7,
-          z: z + JITTER(i * 13) * 3,
+          z: topZ + JITTER(i * 13) * 3,
           rx: 0,
           ry: JITTER(i * 7) * 5,
           rz: 0,
@@ -652,7 +735,7 @@ export class BoardScene implements EngineScene {
   canMoveTableTile(t: TileId): boolean {
     const v = this.view;
     if (!v || v.status !== 'playing' || v.turn !== v.you) return false;
-    return v.players[v.you].opened || v.playedThisTurn.includes(t);
+    return v.players[v.you]!.opened || v.playedThisTurn.includes(t);
   }
 
   private onDown = (e: PointerEvent) => {

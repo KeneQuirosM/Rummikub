@@ -5,7 +5,7 @@ export type ConnectionStatus = 'connected' | 'reconnecting' | 'offline';
 export interface TransportEvents {
   state: (v: PlayerView) => void;
   drag: (d: DragPayload) => void;
-  emote: (e: { from: 0 | 1; emoji: string }) => void;
+  emote: (e: { from: number; emoji: string }) => void;
   chat: (m: ChatMessage) => void;
   status: (s: ConnectionStatus) => void;
   closed: () => void;

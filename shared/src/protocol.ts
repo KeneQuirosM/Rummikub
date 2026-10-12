@@ -34,7 +34,10 @@ export type RoomErrorCode =
   | 'ROOM_FULL'
   | 'BAD_REQUEST'
   | 'NOT_IN_ROOM'
-  | 'RATE_LIMITED';
+  | 'RATE_LIMITED'
+  | 'GAME_IN_PROGRESS'
+  | 'NOT_HOST'
+  | 'NOT_ENOUGH_PLAYERS';
 
 export interface PublicPlayer {
   name: string;
@@ -43,23 +46,25 @@ export interface PublicPlayer {
   rackCount: number;
   opened: boolean;
   isBot: boolean;
+  /** Abandonó la partida y el bot juega por él. */
+  replaced?: boolean;
   wins: number;
 }
 
 export type GameStatus = 'waiting' | 'playing' | 'ended';
 
 export interface GameResult {
-  /** Índice del ganador o null si empate. */
-  winner: 0 | 1 | null;
+  /** Asientos ganadores (más de uno si empatan con el pozo agotado). */
+  winners: number[];
   reason: 'out' | 'pool';
-  /** Puntos que quedaron en cada atril. */
-  points: [number, number];
+  /** Puntos que quedaron en cada atril (por asiento). */
+  points: number[];
 }
 
 export type GameEvent =
   | { type: 'start'; seq: number }
-  | { type: 'draw'; player: 0 | 1; seq: number; timeout?: boolean }
-  | { type: 'play'; player: 0 | 1; seq: number; tiles: TileId[] }
+  | { type: 'draw'; player: number; seq: number; timeout?: boolean }
+  | { type: 'play'; player: number; seq: number; tiles: TileId[] }
   | { type: 'end'; seq: number };
 
 /**
@@ -68,12 +73,16 @@ export type GameEvent =
  */
 export interface PlayerView {
   roomCode: string;
-  you: 0 | 1;
-  players: [PublicPlayer, PublicPlayer];
+  /** Mi asiento (0..n-1). */
+  you: number;
+  /** Jugadores por asiento, en orden de turno (2 a 4). */
+  players: PublicPlayer[];
+  /** Asiento del anfitrión (quien puede empezar la partida). */
+  host: number;
   rack: TileId[];
   table: Meld[];
   poolCount: number;
-  turn: 0 | 1;
+  turn: number;
   /** Epoch ms del servidor en que vence el turno (null = sin límite). */
   turnDeadline: number | null;
   serverNow: number;
@@ -86,7 +95,7 @@ export interface PlayerView {
   turnStartTable: TileId[];
   lastEvent: GameEvent | null;
   result: GameResult | null;
-  rematch: [boolean, boolean];
+  rematch: boolean[];
   version: number;
   /** Siguiente id de combinación (para predicción determinista en el cliente). */
   nextMeldSeq: number;
@@ -116,7 +125,7 @@ export type Ack<T = {}> = ({ ok: true } & T) | { ok: false; error: GameErrorCode
 export interface RoomJoined {
   code: string;
   token: string;
-  seat: 0 | 1;
+  seat: number;
 }
 
 export interface DragPayload {
@@ -129,7 +138,7 @@ export interface DragPayload {
 }
 
 export interface ChatMessage {
-  from: 0 | 1;
+  from: number;
   text: string;
   at: number;
 }
@@ -142,6 +151,7 @@ export interface ClientToServerEvents {
   'room:leave': () => void;
   'game:intent': (i: Intent, ack: (r: Ack) => void) => void;
   'game:rematch': () => void;
+  'room:start': (ack: (r: Ack) => void) => void;
   drag: (d: DragPayload) => void;
   emote: (e: string) => void;
   chat: (text: string) => void;
@@ -150,10 +160,13 @@ export interface ClientToServerEvents {
 export interface ServerToClientEvents {
   state: (v: PlayerView) => void;
   drag: (d: DragPayload) => void;
-  emote: (e: { from: 0 | 1; emoji: string }) => void;
+  emote: (e: { from: number; emoji: string }) => void;
   chat: (m: ChatMessage) => void;
   'room:closed': () => void;
 }
+
+export const MIN_PLAYERS = 2;
+export const MAX_PLAYERS = 4;
 
 export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 export const ROOM_CODE_REGEX = /^[A-Z]{4}$/;

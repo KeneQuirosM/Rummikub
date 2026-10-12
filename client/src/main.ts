@@ -1,10 +1,10 @@
 import './styles.css';
-import { ROOM_CODE_REGEX, type PlayerView } from '@rummi/shared';
+import { MAX_PLAYERS, ROOM_CODE_REGEX, type PlayerView } from '@rummi/shared';
 import { unlockAudio } from './audio';
 import { applyI18n, setLang, t } from './i18n';
 import type { Transport } from './net/transport';
 import { getSessionToken, onSettingsChange, profile, settings } from './settings';
-import { $, banner, closeAllModals, confirmDialog, modal, show, toast } from './ui/dom';
+import { $, banner, closeAllModals, confirmDialog, escapeHtml, modal, show, toast } from './ui/dom';
 import { openHowTo, openJoin, openProfile, openSettings } from './ui/menus';
 import type { Engine } from './three/engine';
 import type { BoardScene } from './three/board';
@@ -91,7 +91,8 @@ function showMenu() {
 function bindMenu() {
   $('btn-create').addEventListener('click', () => void createRoom());
   $('btn-join').addEventListener('click', () => openJoin((c) => void joinRoom(c)));
-  $('btn-practice').addEventListener('click', () => void startPractice());
+  // La primera vez va directo al tutorial (1 vs 1); después se elige cuántos bots
+  $('btn-practice').addEventListener('click', () => (settings.tutorialDone ? choosePractice() : void startPractice()));
   $('btn-settings').addEventListener('click', () => openSettings({ onTutorial: () => void startPractice(true) }));
   $('btn-howto').addEventListener('click', () => openHowTo(() => void startPractice(true)));
   $('profile-chip').addEventListener('click', () => openProfile(refreshProfileChip));
@@ -176,13 +177,49 @@ function showLobby(code: string, tr: SocketTransport) {
       prompt(t('room.copy'), link);
     }
   };
+  const startBtn = $<HTMLButtonElement>('btn-start');
+  startBtn.onclick = async () => {
+    startBtn.disabled = true;
+    const r = await tr.start();
+    startBtn.disabled = false;
+    if (!r.ok) toast(t(`err.${r.error}`), 'error');
+  };
+  const render = (v: PlayerView) => renderLobby(v);
+  if (tr.lastState?.status === 'waiting') render(tr.lastState);
   const off = tr.on('state', (v: PlayerView) => {
     if (v.status !== 'waiting') {
       off();
+      offClosed();
       pendingSocket = null;
       void startGame(tr, v);
-    }
+    } else render(v);
   });
+  const offClosed = tr.on('closed', () => {
+    off();
+    offClosed();
+    toast(t('err.ROOM_NOT_FOUND'), 'error');
+    pendingSocket = null;
+    showMenu();
+  });
+}
+
+/** Lista de jugadores de la sala de espera (hasta 4) y botón de empezar para el anfitrión. */
+function renderLobby(v: PlayerView) {
+  const list = $('lobby-players');
+  const rows = v.players.map((p, i) => {
+    const tags = [i === v.host ? `👑 ${t('lobby.host')}` : '', i === v.you ? t('lobby.you') : ''].filter(Boolean).join(' · ');
+    return `<li><span class="avatar">${escapeHtml(p.avatar)}</span>${escapeHtml(p.name)}${p.connected ? '' : ' <i class="dot off"></i>'}<span class="tag">${tags}</span></li>`;
+  });
+  for (let i = v.players.length; i < MAX_PLAYERS; i++) rows.push(`<li class="empty">${t('lobby.empty')}</li>`);
+  list.innerHTML = rows.join('');
+  const n = v.players.length;
+  const host = v.players[v.host];
+  const iAmHost = v.you === v.host || !host?.connected;
+  const btn = $<HTMLButtonElement>('btn-start');
+  btn.hidden = !iAmHost;
+  btn.disabled = n < 2;
+  btn.textContent = t('lobby.start', { n });
+  $('lobby-status').textContent = n < 2 ? t('lobby.needMore') : iAmHost ? t('lobby.canStart') : t('lobby.waitHost', { name: host?.name ?? '' });
 }
 
 async function joinRoom(code: string) {
@@ -191,37 +228,57 @@ async function joinRoom(code: string) {
     showMenu();
     return;
   }
-  let first: PlayerView | null = null;
-  const off = tr.on('state', (v) => (first = v));
   const r = await tr.join(code, getSessionToken(code));
   if (!r.ok) {
-    off();
     tr.leave();
     toast(t(`err.${r.error}`), 'error', 4000);
     showMenu();
     return;
   }
   setUrlRoom(code);
-  // Si soy el creador y el rival aún no llegó (recarga en la sala de espera)
-  const waitFirst = async () => {
-    for (let i = 0; i < 40 && !first; i++) await new Promise((res) => setTimeout(res, 50));
-    return first as PlayerView | null;
-  };
-  const v = await waitFirst();
-  off();
-  if (v && v.status === 'waiting') {
+  // Esperar el primer estado (puede tardar en redes lentas); la sala de espera también sabe arrancar la partida
+  const v =
+    tr.lastState ??
+    (await new Promise<PlayerView | null>((res) => {
+      const timer = setTimeout(() => {
+        off();
+        res(tr.lastState);
+      }, 10_000);
+      const off = tr.on('state', (s) => {
+        clearTimeout(timer);
+        off();
+        res(s);
+      });
+    }));
+  if (!v || v.status === 'waiting') {
     pendingSocket = tr;
     showLobby(code, tr);
     return;
   }
-  void startGame(tr, v ?? undefined);
+  void startGame(tr, v);
 }
 
 // ------------------------------------------------------------------ práctica
 
-async function startPractice(forceTutorial = false) {
+/** Elegir contra cuántos bots (1 a 3) jugar la práctica. */
+function choosePractice() {
+  const m = modal(`
+    <h2>${t('practice.title')}</h2>
+    <div class="bots-pick">
+      ${[1, 2, 3].map((n) => `<button type="button" data-n="${n}"><b>${n}</b><span>🤖 ${n === 1 ? t('practice.rival') : t('practice.rivals')}</span></button>`).join('')}
+    </div>
+    <div class="actions-row"><button class="btn" data-close>${t('common.cancel')}</button></div>`);
+  m.el.querySelector('.bots-pick')!.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-n]');
+    if (!b) return;
+    m.close();
+    void startPractice(false, Number(b.dataset.n));
+  });
+}
+
+async function startPractice(forceTutorial = false, bots = 1) {
   const { LocalTransport } = await import('./net/local');
-  const tr = new LocalTransport(profile, settings.turnSeconds);
+  const tr = new LocalTransport(profile, settings.turnSeconds, bots);
   await startGame(tr);
   if ((forceTutorial || !settings.tutorialDone) && session) {
     const { startTutorial } = await import('./ui/tutorial');
@@ -263,9 +320,27 @@ async function startGame(transport: Transport, initial?: PlayerView) {
       toast(t('err.ROOM_NOT_FOUND'), 'error', 4000);
       leaveGame();
     }),
+    // Revancha sin suficientes jugadores: la sala vuelve a la espera para que entre más gente
+    transport.on('state', (v) => {
+      if (v.status !== 'waiting' || transport.kind !== 'online') return;
+      const tr = transport as SocketTransport;
+      teardownSession(false);
+      showMenu();
+      setUrlRoom(v.roomCode);
+      pendingSocket = tr;
+      showLobby(v.roomCode, tr);
+    }),
   ];
   session = { transport, board, ctl, hud, offs };
   const init = transport.lastState ?? initial;
+  if (init?.status === 'waiting' && transport.kind === 'online') {
+    // La sala volvió a la espera mientras se montaba la escena
+    teardownSession(false);
+    showMenu();
+    pendingSocket = transport as SocketTransport;
+    showLobby(init.roomCode, transport as SocketTransport);
+    return;
+  }
   if (init) ctl.receive(init);
   hud.layout();
   void enterImmersive();
@@ -294,7 +369,7 @@ function openGameMenu() {
   });
 }
 
-function leaveGame() {
+function teardownSession(leaveTransport: boolean) {
   const s = session;
   session = null;
   if (s) {
@@ -302,11 +377,15 @@ function leaveGame() {
     s.offs.forEach((f) => f());
     s.hud.dispose();
     s.ctl.dispose();
-    s.transport.leave();
+    if (leaveTransport) s.transport.leave();
   }
   closeAllModals();
   banner(null);
   void exitImmersive();
+}
+
+function leaveGame() {
+  teardownSession(true);
   showMenu(); // libera la escena de juego (dispose) y vuelve al fondo del menú
 }
 
@@ -387,7 +466,7 @@ if (import.meta.env.DEV) {
     const s = session;
     const v = s?.ctl.view;
     if (!s || !v || v.turn !== v.you || v.status !== 'playing') return;
-    const plan = planBotTurn({ start: { rack: v.rack, table: v.table }, opened: v.players[v.you].opened });
+    const plan = planBotTurn({ start: { rack: v.rack, table: v.table }, opened: v.players[v.you]!.opened });
     for (const m of plan.moves) {
       const i = botMoveToIntent(m, s.ctl.view!.table);
       if (i && i.type === 'move') s.ctl.move(i.tileId, i.to);

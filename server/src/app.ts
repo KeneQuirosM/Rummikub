@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import { extname, join, normalize, resolve } from 'node:path';
 import { Server, type Socket } from 'socket.io';
 import type { ClientToServerEvents, Seat, ServerToClientEvents } from '@rummi/shared';
-import { isEmote, RoomManager, sanitizeChat, type Room } from './rooms.js';
+import { ABSENT_TURN_MS, isEmote, RoomManager, sanitizeChat, type Room } from './rooms.js';
 
 export interface AppOptions {
   port?: number;
@@ -17,7 +17,8 @@ export interface AppOptions {
 
 interface SocketData {
   code?: string;
-  seat?: Seat;
+  /** Token del asiento (los índices pueden cambiar en una revancha). */
+  token?: string;
   buckets: Record<string, { tokens: number; at: number }>;
 }
 
@@ -110,11 +111,31 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
     maxHttpBufferSize: 16_000,
   });
 
+  const botTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   const broadcast = (room: Room) => {
     room.seats.forEach((s, i) => {
-      if (s?.socketId) io.to(s.socketId).emit('state', rooms.view(room, i as Seat));
+      if (s.socketId) io.to(s.socketId).emit('state', rooms.view(room, i));
     });
     schedule(room);
+    driveBot(room);
+  };
+
+  /** Bot sustituto de jugadores que abandonaron: un movimiento cada ~0.4 s. */
+  const driveBot = (room: Room) => {
+    if (botTimers.has(room.code) || !rooms.isBotTurn(room)) return;
+    const thinking = !room.botPlan;
+    botTimers.set(
+      room.code,
+      setTimeout(
+        () => {
+          botTimers.delete(room.code);
+          if (!rooms.rooms.has(room.code)) return;
+          if (rooms.botStep(room)) broadcast(room);
+        },
+        thinking ? 1100 : 400,
+      ),
+    );
   };
 
   /** Temporizador del turno: dispara exactamente al vencer. */
@@ -123,8 +144,13 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
     if (prev) clearTimeout(prev);
     timers.delete(room.code);
     const g = room.game;
-    if (!g || g.status !== 'playing' || g.turnDeadline === null) return;
-    const ms = Math.max(0, g.turnDeadline - now()) + 20;
+    if (!g || g.status !== 'playing') return;
+    let at = g.turnDeadline;
+    // Sin límite de tiempo: si el jugador en turno está desconectado, no esperarlo para siempre
+    const cur = room.seats[g.turn];
+    if (at === null && cur && !cur.replaced && !cur.socketId && cur.disconnectedAt !== null) at = cur.disconnectedAt + ABSENT_TURN_MS;
+    if (at === null) return;
+    const ms = Math.max(0, at - now()) + 20;
     timers.set(
       room.code,
       setTimeout(() => {
@@ -137,19 +163,29 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
   };
 
   const seatOf = (socket: S): { room: Room; seat: Seat } | null => {
-    const { code, seat } = socket.data;
-    if (!code || seat === undefined) return null;
+    const { code, token } = socket.data;
+    if (!code || !token) return null;
     const room = rooms.rooms.get(code);
-    if (!room || room.seats[seat]?.socketId !== socket.id) return null;
+    if (!room) return null;
+    const seat = rooms.seatByToken(room, token);
+    if (seat < 0 || room.seats[seat]!.socketId !== socket.id) return null;
     return { room, seat };
   };
 
-  const attach = (socket: S, room: Room, seat: Seat) => {
+  const attach = (socket: S, room: Room, token: string) => {
     // Si este socket estaba en otra sala, salir
     if (socket.data.code && socket.data.code !== room.code) void socket.leave(socket.data.code);
     socket.data.code = room.code;
-    socket.data.seat = seat;
+    socket.data.token = token;
     void socket.join(room.code);
+  };
+
+  const clearRoomTimers = (code: string) => {
+    for (const m of [timers, botTimers]) {
+      const t = m.get(code);
+      if (t) clearTimeout(t);
+      m.delete(code);
+    }
   };
 
   io.on('connection', (socket: S) => {
@@ -159,7 +195,7 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
       if (typeof ack !== 'function') return;
       if (!allow(socket, 'room', now())) return ack({ ok: false, error: 'RATE_LIMITED' });
       const { room, seat, token } = rooms.create(p ?? {}, p?.settings, socket.id);
-      attach(socket, room, seat);
+      attach(socket, room, token);
       log(`[room ${room.code}] creada`);
       ack({ ok: true, code: room.code, token, seat });
       broadcast(room);
@@ -170,14 +206,14 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
       if (!allow(socket, 'room', now())) return ack({ ok: false, error: 'RATE_LIMITED' });
       const prevSocket = (() => {
         const room = rooms.rooms.get(String(p?.code ?? '').toUpperCase());
-        const s = room?.seats.find((x) => x && x.token === p?.token);
+        const s = room?.seats.find((x) => x.token === p?.token);
         return s?.socketId ?? null;
       })();
       const r = rooms.join(p?.code, p ?? {}, p?.token, socket.id);
       if (!r.ok) return ack(r);
       // Expulsar la conexión anterior del mismo asiento (otra pestaña / socket zombie)
       if (prevSocket && prevSocket !== socket.id) io.sockets.sockets.get(prevSocket)?.disconnect(true);
-      attach(socket, r.room, r.seat);
+      attach(socket, r.room, r.token);
       log(`[room ${r.room.code}] asiento ${r.seat} ${r.reconnected ? 'reconectado' : 'unido'}`);
       ack({ ok: true, code: r.room.code, token: r.token, seat: r.seat });
       broadcast(r.room);
@@ -194,6 +230,19 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
       ack(r);
     });
 
+    socket.on('room:start', (ack) => {
+      if (typeof ack !== 'function') return;
+      if (!allow(socket, 'room', now())) return ack({ ok: false, error: 'RATE_LIMITED' });
+      const ctx = seatOf(socket);
+      if (!ctx) return ack({ ok: false, error: 'NOT_IN_ROOM' });
+      const r = rooms.start(ctx.room, ctx.seat);
+      if (r.ok) {
+        log(`[room ${ctx.room.code}] partida de ${ctx.room.seats.length} jugadores`);
+        broadcast(ctx.room);
+      }
+      ack(r);
+    });
+
     socket.on('game:rematch', () => {
       const ctx = seatOf(socket);
       if (!ctx) return;
@@ -207,8 +256,11 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
       const g = ctx.room.game;
       if (!g || g.status !== 'playing' || g.turn !== ctx.seat) return;
       const safe = rooms.filterDrag(ctx.room, d);
-      const other = ctx.room.seats[1 - ctx.seat];
-      if (safe && other?.socketId) io.to(other.socketId).volatile.emit('drag', safe);
+      if (!safe) return;
+      // A todos los demás jugadores de la mesa
+      ctx.room.seats.forEach((s, i) => {
+        if (i !== ctx.seat && s.socketId) io.to(s.socketId).volatile.emit('drag', safe);
+      });
     });
 
     socket.on('emote', (e) => {
@@ -230,13 +282,11 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
       const r = rooms.leave(ctx.room.code, ctx.seat, socket.id);
       void socket.leave(ctx.room.code);
       socket.data.code = undefined;
-      socket.data.seat = undefined;
+      socket.data.token = undefined;
       if (!r) return;
       if (r.closed) {
         io.to(ctx.room.code).emit('room:closed');
-        const t = timers.get(ctx.room.code);
-        if (t) clearTimeout(t);
-        timers.delete(ctx.room.code);
+        clearRoomTimers(ctx.room.code);
       } else broadcast(r.room);
     });
 
@@ -250,9 +300,7 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
 
   const sweeper = setInterval(() => {
     for (const code of rooms.sweep()) {
-      const t = timers.get(code);
-      if (t) clearTimeout(t);
-      timers.delete(code);
+      clearRoomTimers(code);
       log(`[room ${code}] eliminada por inactividad`);
     }
   }, 60_000);
@@ -271,6 +319,7 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
           new Promise<void>((res) => {
             clearInterval(sweeper);
             timers.forEach(clearTimeout);
+            botTimers.forEach(clearTimeout);
             io.close(() => res());
           }),
       });

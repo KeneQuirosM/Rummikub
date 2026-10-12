@@ -22,10 +22,11 @@
 
 ```ts
 GameState {
+  numPlayers: 2..4
   pool: TileId[]                 // orden del pozo: solo en el servidor
-  racks: [TileId[], TileId[]]    // atriles confirmados
+  racks: TileId[][]              // atriles confirmados, uno por asiento
   table: Meld[]                  // mesa confirmada (inicio del turno)
-  opened: [bool, bool]
+  opened: bool[]
   turn, status, turnDeadline, turnSeconds
   working: { rack, table }       // edición del turno en curso (pública salvo el atril)
   history: Snapshot[]            // deshacer ilimitado dentro del turno
@@ -45,13 +46,18 @@ Cliente → servidor (todas con *ack* `{ok}|{ok:false,error}`):
 | Evento | Payload |
 |---|---|
 | `room:create` | `{name, avatar, settings:{turnSeconds}}` → `{code, token, seat}` |
-| `room:join` | `{code, name, avatar, token?}` → `{code, token, seat}` (con token = reconexión) |
+| `room:join` | `{code, name, avatar, token?}` → `{code, token, seat}` (con token = reconexión). Errores: `ROOM_NOT_FOUND`, `ROOM_FULL` (4), `GAME_IN_PROGRESS` |
+| `room:start` | — (anfitrión, 2–4 jugadores) → `{ok}` o `NOT_HOST` / `NOT_ENOUGH_PLAYERS` |
 | `game:intent` | `{type:'move', tileId, to:{kind:'rack'|'new'|'meld', meldId?, index?}}`, `undo`, `reset`, `draw`, `endTurn` |
 | `game:rematch` | — |
 | `drag` | `{tileId|null, x, z, active}` (volátil, ~20 Hz) |
 | `emote` / `chat` | emoji / texto |
 
-Servidor → cliente: `state` (PlayerView filtrada), `drag` (fantasma del rival), `emote`, `chat`, `room:closed`.
+Servidor → cliente: `state` (PlayerView filtrada), `drag` (fantasma del jugador en turno, a todos los demás), `emote`, `chat`, `room:closed`.
+
+`PlayerView.players` tiene 2–4 entradas por asiento (`you`, `turn` y `host` son índices). `result.winners` es una lista
+(empates con el pozo agotado) y `result.points` tiene los puntos de cada asiento. Un asiento con `replaced: true`
+abandonó y lo juega el bot del servidor. Los asientos se identifican por token (pueden reordenarse en una revancha).
 
 `PlayerView` nunca contiene el atril rival (solo `rackCount`) ni el pozo (solo `poolCount`). El fantasma de
 arrastre solo incluye el id de la ficha si ésta ya es pública (está en la mesa).

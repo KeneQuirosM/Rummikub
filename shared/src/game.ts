@@ -17,16 +17,20 @@ import {
   type TurnContext,
   type TurnSnapshot,
 } from './rules.js';
+import { MAX_PLAYERS, MIN_PLAYERS } from './protocol.js';
 import { createDeck, isValidTileId, mulberry32, RACK_SIZE, shuffle, type TileId } from './tiles.js';
 
-export type Seat = 0 | 1;
+/** Asiento 0..n-1 (n = 2..4), en orden de turno. */
+export type Seat = number;
 
 export interface GameState {
+  /** Número de jugadores (2 a 4). */
+  numPlayers: number;
   pool: TileId[];
-  racks: [TileId[], TileId[]];
+  racks: TileId[][];
   /** Mesa confirmada (al inicio del turno actual). */
   table: Meld[];
-  opened: [boolean, boolean];
+  opened: boolean[];
   turn: Seat;
   status: GameStatus;
   turnSeconds: number;
@@ -42,6 +46,8 @@ export interface GameState {
 }
 
 export interface CreateGameOptions {
+  /** Jugadores (2 a 4). Por defecto 2. */
+  players?: number;
   seed?: number;
   turnSeconds?: number;
   firstPlayer?: Seat;
@@ -51,15 +57,16 @@ export interface CreateGameOptions {
 export function createGame(opts: CreateGameOptions = {}): GameState {
   const seed = opts.seed ?? Math.floor(Math.random() * 2 ** 31);
   const rand = mulberry32(seed);
+  const n = Math.max(MIN_PLAYERS, Math.min(MAX_PLAYERS, Math.floor(opts.players ?? 2)));
   const pool = shuffle(createDeck(), rand);
-  const r0 = pool.splice(0, RACK_SIZE);
-  const r1 = pool.splice(0, RACK_SIZE);
-  const first: Seat = opts.firstPlayer ?? (rand() < 0.5 ? 0 : 1);
+  const racks = Array.from({ length: n }, () => pool.splice(0, RACK_SIZE));
+  const first: Seat = opts.firstPlayer !== undefined ? opts.firstPlayer % n : Math.floor(rand() * n);
   const state: GameState = {
+    numPlayers: n,
     pool,
-    racks: [r0, r1],
+    racks,
     table: [],
-    opened: [false, false],
+    opened: new Array<boolean>(n).fill(false),
     turn: first,
     status: 'playing',
     turnSeconds: opts.turnSeconds ?? 60,
@@ -79,13 +86,13 @@ export function createGame(opts: CreateGameOptions = {}): GameState {
 
 function startTurn(state: GameState, seat: Seat, now: number): void {
   state.turn = seat;
-  state.working = { rack: [...state.racks[seat]], table: state.table.map((m) => ({ id: m.id, tiles: [...m.tiles] })) };
+  state.working = { rack: [...state.racks[seat]!], table: state.table.map((m) => ({ id: m.id, tiles: [...m.tiles] })) };
   state.history = [];
   state.turnDeadline = state.turnSeconds > 0 ? now + state.turnSeconds * 1000 : null;
 }
 
 export function turnContext(state: GameState): TurnContext {
-  return { start: { rack: state.racks[state.turn], table: state.table }, opened: state.opened[state.turn] };
+  return { start: { rack: state.racks[state.turn]!, table: state.table }, opened: state.opened[state.turn]! };
 }
 
 function meldIdGen(state: GameState): () => string {
@@ -96,12 +103,12 @@ export function cloneGame(s: GameState): GameState {
   return {
     ...s,
     pool: [...s.pool],
-    racks: [[...s.racks[0]], [...s.racks[1]]],
+    racks: s.racks.map((r) => [...r]),
     table: s.table.map((m) => ({ id: m.id, tiles: [...m.tiles] })),
-    opened: [...s.opened] as [boolean, boolean],
+    opened: [...s.opened],
     working: cloneSnapshot(s.working),
     history: s.history.map(cloneSnapshot),
-    result: s.result ? { ...s.result, points: [...s.result.points] as [number, number] } : null,
+    result: s.result ? { ...s.result, winners: [...s.result.winners], points: [...s.result.points] } : null,
   };
 }
 
@@ -109,27 +116,28 @@ function finish(state: GameState, reason: 'out' | 'pool'): void {
   const sc = scoring(state.racks);
   state.status = 'ended';
   state.turnDeadline = null;
-  state.result = {
-    winner: sc.winner === null ? null : (sc.winner as Seat),
-    reason,
-    points: [sc.points[0]!, sc.points[1]!],
-  };
+  state.result = { winners: sc.winners, reason, points: sc.points };
   state.lastEvent = { type: 'end', seq: ++state.eventSeq };
 }
 
 /** Revierte el turno, roba una ficha y pasa el turno. Si el pozo está vacío termina la partida. */
 function drawAndPass(state: GameState, now: number, timeout = false): void {
   const seat = state.turn;
-  state.working = { rack: [...state.racks[seat]], table: state.table.map((m) => ({ id: m.id, tiles: [...m.tiles] })) };
+  state.working = { rack: [...state.racks[seat]!], table: state.table.map((m) => ({ id: m.id, tiles: [...m.tiles] })) };
   state.history = [];
   if (state.pool.length === 0) {
     finish(state, 'pool');
     return;
   }
   const tile = state.pool.pop()!;
-  state.racks[seat].push(tile);
+  state.racks[seat]!.push(tile);
   state.lastEvent = { type: 'draw', player: seat, seq: ++state.eventSeq, ...(timeout ? { timeout: true } : {}) };
-  startTurn(state, (1 - seat) as Seat, now);
+  startTurn(state, nextSeat(state, seat), now);
+}
+
+/** Siguiente asiento en orden de turno. */
+export function nextSeat(state: GameState, seat: Seat): Seat {
+  return (seat + 1) % state.numPlayers;
 }
 
 export type IntentResult = { ok: true } | { ok: false; error: GameErrorCode };
@@ -191,7 +199,7 @@ export function applyIntent(state: GameState, seat: Seat, intent: Intent, now = 
     case 'reset': {
       if (state.history.length === 0) return { ok: false, error: 'NOTHING_TO_UNDO' };
       state.history = [];
-      state.working = { rack: [...state.racks[seat]], table: state.table.map((m) => ({ id: m.id, tiles: [...m.tiles] })) };
+      state.working = { rack: [...state.racks[seat]!], table: state.table.map((m) => ({ id: m.id, tiles: [...m.tiles] })) };
       break;
     }
     case 'draw': {
@@ -209,10 +217,10 @@ export function applyIntent(state: GameState, seat: Seat, intent: Intent, now = 
       state.table = state.working.table.map((m) => ({ id: m.id, tiles: [...m.tiles] }));
       if (r.openedNow) state.opened[seat] = true;
       state.lastEvent = { type: 'play', player: seat, seq: ++state.eventSeq, tiles: r.played };
-      if (state.racks[seat].length === 0) {
+      if (state.racks[seat]!.length === 0) {
         finish(state, 'out');
       } else {
-        startTurn(state, (1 - seat) as Seat, now);
+        startTurn(state, nextSeat(state, seat), now);
       }
       break;
     }
@@ -229,9 +237,26 @@ export function checkTimeout(state: GameState, now = Date.now()): boolean {
   return true;
 }
 
+/** Fuerza el fin del turno actual (revertir + robar), p. ej. por un jugador ausente. */
+export function forceDraw(state: GameState, now = Date.now()): boolean {
+  if (state.status !== 'playing') return false;
+  drawAndPass(state, now, true);
+  state.version++;
+  return true;
+}
+
+/** Termina la partida ahora (p. ej. si solo queda un humano). Gana quien tenga menos puntos. */
+export function forceFinish(state: GameState): void {
+  if (state.status !== 'playing') return;
+  state.working = { rack: [...state.racks[state.turn]!], table: state.table.map((m) => ({ id: m.id, tiles: [...m.tiles] })) };
+  state.history = [];
+  finish(state, 'pool');
+  state.version++;
+}
+
 /** Atril visible para un asiento (si es su turno, el atril en edición). */
 export function rackOf(state: GameState, seat: Seat): TileId[] {
-  return state.turn === seat && state.status === 'playing' ? state.working.rack : state.racks[seat];
+  return state.turn === seat && state.status === 'playing' ? state.working.rack : state.racks[seat]!;
 }
 
 export function currentTable(state: GameState): Meld[] {
@@ -240,25 +265,28 @@ export function currentTable(state: GameState): Meld[] {
 
 export interface ViewMeta {
   roomCode: string;
-  players: [Omit<PublicPlayer, 'rackCount' | 'opened'>, Omit<PublicPlayer, 'rackCount' | 'opened'>];
-  rematch: [boolean, boolean];
+  /** Datos públicos por asiento (tantos como jugadores). */
+  players: Omit<PublicPlayer, 'rackCount' | 'opened'>[];
+  rematch: boolean[];
+  host?: number;
   now?: number;
 }
 
 /** Proyección filtrada del estado para un jugador (anti-trampa: sin atril rival ni pozo). */
 export function viewFor(state: GameState, seat: Seat, meta: ViewMeta): PlayerView {
-  const players = [0, 1].map((i) => ({
-    ...meta.players[i as Seat],
-    rackCount: rackOf(state, i as Seat).length,
-    opened: state.opened[i as Seat],
-  })) as [PublicPlayer, PublicPlayer];
+  const players: PublicPlayer[] = state.racks.map((_, i) => ({
+    ...meta.players[i]!,
+    rackCount: rackOf(state, i).length,
+    opened: state.opened[i]!,
+  }));
   const playing = state.status === 'playing';
-  const startRack = state.racks[state.turn];
+  const startRack = state.racks[state.turn]!;
   const workingRack = new Set(state.working.rack);
   return {
     roomCode: meta.roomCode,
     you: seat,
     players,
+    host: meta.host ?? 0,
     rack: [...rackOf(state, seat)],
     table: currentTable(state).map((m) => ({ id: m.id, tiles: [...m.tiles] })),
     poolCount: state.pool.length,
@@ -272,7 +300,7 @@ export function viewFor(state: GameState, seat: Seat, meta: ViewMeta): PlayerVie
     turnStartTable: tableTiles(state.table),
     lastEvent: state.lastEvent,
     result: state.result,
-    rematch: meta.rematch,
+    rematch: [...meta.rematch],
     version: state.version,
     nextMeldSeq: state.nextMeldSeq,
   };

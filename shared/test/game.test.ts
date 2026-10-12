@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyIntent, checkTimeout, createGame, sanitizeIntent, viewFor, type GameState, type Seat, type ViewMeta } from '../src/game.js';
+import { applyIntent, checkTimeout, createGame, forceDraw, forceFinish, sanitizeIntent, viewFor, type GameState, type Seat, type ViewMeta } from '../src/game.js';
 import { B, K, O, R } from './helpers.js';
 
 const meta: ViewMeta = {
@@ -13,13 +13,11 @@ const meta: ViewMeta = {
 
 function rig(state: GameState, seat: Seat, rack: number[]) {
   // Fuerza un atril concreto (conserva el total de fichas intercambiando con el pozo)
-  const all = [...state.pool, ...state.racks[0], ...state.racks[1]];
-  const other = (1 - seat) as Seat;
+  const all = [...state.pool, ...state.racks.flat()];
   const rest = all.filter((t) => !rack.includes(t));
-  state.racks[seat] = [...rack];
-  state.racks[other] = rest.splice(0, 14);
+  state.racks = state.racks.map((_, i) => (i === seat ? [...rack] : rest.splice(0, 14)));
   state.pool = rest;
-  state.working = { rack: [...state.racks[state.turn]], table: [] };
+  state.working = { rack: [...state.racks[state.turn]!], table: [] };
 }
 
 describe('partida', () => {
@@ -28,7 +26,7 @@ describe('partida', () => {
     expect(g.racks[0]).toHaveLength(14);
     expect(g.racks[1]).toHaveLength(14);
     expect(g.pool).toHaveLength(78);
-    expect(new Set([...g.pool, ...g.racks[0], ...g.racks[1]]).size).toBe(106);
+    expect(new Set([...g.pool, ...g.racks[0]!, ...g.racks[1]!]).size).toBe(106);
   });
 
   it('solo juega quien tiene el turno', () => {
@@ -100,7 +98,7 @@ describe('partida', () => {
     g.working = { rack: [R(1)], table: [] };
     applyIntent(g, 0, { type: 'draw' });
     expect(g.status).toBe('ended');
-    expect(g.result).toEqual({ winner: 0, reason: 'pool', points: [1, 13] });
+    expect(g.result).toEqual({ winners: [0], reason: 'pool', points: [1, 13] });
   });
 
   it('gana quien se queda sin fichas', () => {
@@ -114,7 +112,7 @@ describe('partida', () => {
     applyIntent(g, 0, { type: 'move', tileId: R(3), to: { kind: 'meld', meldId: id, index: 2 } });
     applyIntent(g, 0, { type: 'endTurn' });
     expect(g.status).toBe('ended');
-    expect(g.result?.winner).toBe(0);
+    expect(g.result?.winners).toEqual([0]);
     expect(g.result?.reason).toBe('out');
   });
 
@@ -123,10 +121,10 @@ describe('partida', () => {
     const v = viewFor(g, 1, meta);
     const json = JSON.stringify(v);
     expect(v.rack).toEqual(g.racks[1]);
-    expect(v.players[0].rackCount).toBe(14);
+    expect(v.players[0]!.rackCount).toBe(14);
     expect(json).not.toContain('pool"');
     // Ninguna ficha del rival aparece en la vista
-    for (const t of g.racks[0]) expect(v.rack).not.toContain(t);
+    for (const t of g.racks[0]!) expect(v.rack).not.toContain(t);
     expect(Object.keys(v)).not.toContain('racks');
   });
 
@@ -136,5 +134,63 @@ describe('partida', () => {
     expect(sanitizeIntent({ type: 'move', tileId: 3, to: { kind: 'meld', meldId: 'x', index: -1 } })).toBeNull();
     expect(sanitizeIntent({ type: 'hack' })).toBeNull();
     expect(sanitizeIntent({ type: 'undo', extra: 1 })).toEqual({ type: 'undo' });
+  });
+});
+
+describe('partida de 3 y 4 jugadores', () => {
+  it('reparte 14 a cada uno: con 4 quedan 50 en el pozo', () => {
+    const g = createGame({ seed: 11, players: 4 });
+    expect(g.numPlayers).toBe(4);
+    expect(g.racks.map((r) => r.length)).toEqual([14, 14, 14, 14]);
+    expect(g.pool).toHaveLength(50);
+    expect(new Set([...g.pool, ...g.racks.flat()]).size).toBe(106);
+    expect(createGame({ seed: 1, players: 3 }).pool).toHaveLength(64);
+  });
+
+  it('el turno rota en orden y vuelve al primero', () => {
+    const g = createGame({ seed: 12, players: 3, firstPlayer: 1 });
+    const order: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      order.push(g.turn);
+      expect(applyIntent(g, g.turn, { type: 'draw' }).ok).toBe(true);
+    }
+    expect(order).toEqual([1, 2, 0, 1, 2, 0]);
+    expect(applyIntent(g, (g.turn + 1) % 3, { type: 'draw' })).toEqual({ ok: false, error: 'NOT_YOUR_TURN' });
+  });
+
+  it('pozo agotado con empate: varios ganadores', () => {
+    const g = createGame({ seed: 13, players: 4, firstPlayer: 0 });
+    g.pool = [];
+    g.racks = [[R(5)], [B(5)], [K(13)], [O(9)]];
+    g.working = { rack: [R(5)], table: [] };
+    applyIntent(g, 0, { type: 'draw' });
+    expect(g.result).toEqual({ winners: [0, 1], reason: 'pool', points: [5, 5, 13, 9] });
+  });
+
+  it('la vista de cada jugador solo trae su atril; los demás solo como cantidad', () => {
+    const g = createGame({ seed: 14, players: 4 });
+    const players = [0, 1, 2, 3].map((i) => ({ name: `P${i}`, avatar: '🙂', connected: true, isBot: false, wins: 0 }));
+    for (let seat = 0; seat < 4; seat++) {
+      const v = viewFor(g, seat, { roomCode: 'ABCD', players, rematch: [false, false, false, false] });
+      expect(v.players).toHaveLength(4);
+      expect(v.rack).toEqual(g.racks[seat]);
+      for (let o = 0; o < 4; o++) if (o !== seat) for (const t of g.racks[o]!) expect(v.rack).not.toContain(t);
+      expect(v.players.every((p) => p.rackCount === 14)).toBe(true);
+    }
+  });
+
+  it('forceDraw salta a un jugador ausente', () => {
+    const g = createGame({ seed: 15, players: 3, firstPlayer: 2 });
+    expect(forceDraw(g)).toBe(true);
+    expect(g.turn).toBe(0);
+    expect(g.racks[2]).toHaveLength(15);
+  });
+
+  it('forceFinish termina con ranking por puntos', () => {
+    const g = createGame({ seed: 16, players: 3 });
+    g.racks = [[R(9)], [R(2)], [R(4)]];
+    forceFinish(g);
+    expect(g.status).toBe('ended');
+    expect(g.result?.winners).toEqual([1]);
   });
 });

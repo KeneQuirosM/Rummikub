@@ -54,6 +54,9 @@ async function setupRoom() {
   const pb = nextState(b, (v) => v.status === 'playing');
   const rb = await join(b, ra.code);
   if (!rb.ok) throw new Error('join');
+  // El anfitrión empieza la partida
+  const started = await new Promise<Ack>((res) => a.emit('room:start', res));
+  if (!started.ok) throw new Error('start');
   const [va, vb] = await Promise.all([pa, pb]);
   return { a, b, ra, rb, va, vb };
 }
@@ -70,21 +73,57 @@ describe('salas', () => {
     expect(v.status).toBe('waiting');
   });
 
-  it('sala inexistente y sala llena', async () => {
+  it('sala inexistente y partida ya empezada', async () => {
     const x = await client();
     expect(await join(x, 'ZZZZ')).toEqual({ ok: false, error: 'ROOM_NOT_FOUND' });
     expect(await join(x, '12')).toEqual({ ok: false, error: 'ROOM_NOT_FOUND' });
     const { ra } = await setupRoom();
     if (!ra.ok) return;
     const c = await client();
-    expect(await join(c, ra.code)).toEqual({ ok: false, error: 'ROOM_FULL' });
+    expect(await join(c, ra.code)).toEqual({ ok: false, error: 'GAME_IN_PROGRESS' });
+  });
+
+  it('solo el anfitrión empieza y hacen falta 2', async () => {
+    const a = await client();
+    const b = await client();
+    const ra = await create(a);
+    if (!ra.ok) return;
+    expect(await new Promise<Ack>((res) => a.emit('room:start', res))).toEqual({ ok: false, error: 'NOT_ENOUGH_PLAYERS' });
+    await join(b, ra.code);
+    expect(await new Promise<Ack>((res) => b.emit('room:start', res))).toEqual({ ok: false, error: 'NOT_HOST' });
+  });
+
+  it('cuatro jugadores: la mesa llena empieza sola, el 5.º no entra y el turno rota', async () => {
+    const cs = await Promise.all([client(), client(), client(), client()]);
+    const ra = await create(cs[0]!);
+    if (!ra.ok) return;
+    const playing = cs.map((c) => nextState(c, (v) => v.status === 'playing', 4000));
+    for (let i = 1; i < 4; i++) expect(await join(cs[i]!, ra.code, undefined, `P${i}`)).toMatchObject({ ok: true, seat: i });
+    const views = await Promise.all(playing);
+    expect(views.map((v) => v.you).sort()).toEqual([0, 1, 2, 3]);
+    for (const v of views) {
+      expect(v.players).toHaveLength(4);
+      expect(v.rack).toHaveLength(14);
+      expect(v.poolCount).toBe(50);
+    }
+    // Nadie ve fichas de otro
+    const all = views.flatMap((v) => v.rack);
+    expect(new Set(all).size).toBe(56);
+    const fifth = await client();
+    expect(await join(fifth, ra.code)).toEqual({ ok: false, error: 'GAME_IN_PROGRESS' });
+    // El turno pasa al siguiente asiento
+    const turn = views[0]!.turn;
+    const cur = cs[views.findIndex((v) => v.you === turn)]!;
+    const next = nextState(cs[0]!, (v) => v.turn === (turn + 1) % 4);
+    expect(await new Promise<Ack>((res) => cur.emit('game:intent', { type: 'draw' }, res))).toEqual({ ok: true });
+    await next;
   });
 
   it('al unirse empieza la partida y cada uno ve solo su atril', async () => {
     const { va, vb } = await setupRoom();
     expect(va.rack).toHaveLength(14);
     expect(vb.rack).toHaveLength(14);
-    expect(va.players[1].rackCount).toBe(14);
+    expect(va.players[1]!.rackCount).toBe(14);
     // Anti-trampa: ninguna ficha de B aparece en la vista de A y no hay pozo
     for (const t of vb.rack) expect(va.rack).not.toContain(t);
     expect(JSON.stringify(va)).not.toMatch(/"pool"|"racks"/);
@@ -163,24 +202,26 @@ describe('RoomManager', () => {
     const rm = new RoomManager(() => t);
     const { room } = rm.create({ name: 'A', avatar: '🦊' }, { turnSeconds: 30 }, 's1');
     rm.join(room.code, { name: 'B', avatar: '🐼' }, undefined, 's2');
+    rm.start(room, 0);
     const g = room.game!;
     const seat = g.turn;
-    const before = g.racks[seat].length;
+    const before = g.racks[seat]!.length;
     const tile = g.working.rack[0]!;
     expect(rm.intent(room, seat, { type: 'move', tileId: tile, to: { kind: 'new' } }).ok).toBe(true);
     t += 31_000;
     expect(rm.tick(room)).toBe(true);
     expect(g.racks[seat]).toHaveLength(before + 1);
     expect(g.table).toHaveLength(0);
-    expect(g.turn).toBe(1 - seat);
+    expect(g.turn).toBe((seat + 1) % 2);
   });
 
-  it('revancha: requiere a los dos y alterna quién empieza', () => {
+  it('revancha: requiere a todos y alterna quién empieza', () => {
     const rm = new RoomManager();
     const { room } = rm.create({ name: 'A', avatar: '🦊' }, {}, 's1');
     rm.join(room.code, { name: 'B', avatar: '🐼' }, undefined, 's2');
+    rm.start(room, 0);
     room.game!.status = 'ended';
-    room.game!.result = { winner: 0, reason: 'out', points: [0, 10] };
+    room.game!.result = { winners: [0], reason: 'out', points: [0, 10] };
     const first = room.game!;
     rm.rematch(room, 0);
     expect(room.game).toBe(first);
@@ -204,5 +245,84 @@ describe('RoomManager', () => {
     expect(sanitizeName(42)).toBe('Jugador');
     expect(sanitizeChat('   ')).toBeNull();
     expect(sanitizeChat('a'.repeat(500))).toHaveLength(140);
+  });
+
+  const fourRoom = (rm: RoomManager) => {
+    const { room } = rm.create({ name: 'A', avatar: '🦊' }, { turnSeconds: 0 }, 's0');
+    for (let i = 1; i < 3; i++) rm.join(room.code, { name: `P${i}`, avatar: '🐼' }, undefined, `s${i}`);
+    return room;
+  };
+
+  it('sala de espera: si sale el anfitrión, el siguiente pasa a ser anfitrión', () => {
+    const rm = new RoomManager();
+    const room = fourRoom(rm);
+    expect(room.seats).toHaveLength(3);
+    rm.leave(room.code, 0, 's0');
+    expect(room.seats.map((s) => s.name)).toEqual(['P1', 'P2']);
+    expect(room.host).toBe(0);
+    expect(rm.start(room, 1)).toEqual({ ok: false, error: 'NOT_HOST' });
+    expect(rm.start(room, 0)).toEqual({ ok: true });
+    expect(room.game!.numPlayers).toBe(2);
+  });
+
+  it('abandono en partida: el bot toma su lugar y juega su turno', () => {
+    const rm = new RoomManager();
+    const room = fourRoom(rm);
+    rm.start(room, 0);
+    const g = room.game!;
+    const leaver = g.turn;
+    rm.leave(room.code, leaver, `s${leaver}`);
+    expect(room.seats[leaver]!.replaced).toBe(true);
+    expect(rm.view(room, (leaver + 1) % 3).players[leaver]).toMatchObject({ isBot: true, replaced: true });
+    expect(rm.isBotTurn(room)).toBe(true);
+    let steps = 0;
+    while (rm.isBotTurn(room) && steps++ < 100) rm.botStep(room);
+    expect(g.turn).toBe((leaver + 1) % 3);
+    // Si vuelve con su token recupera el asiento
+    const back = rm.join(room.code, { name: 'X', avatar: '🙂' }, room.seats[leaver]!.token, 'new');
+    expect(back).toMatchObject({ ok: true, seat: leaver, reconnected: true });
+    expect(room.seats[leaver]!.replaced).toBe(false);
+  });
+
+  it('si queda un solo humano la partida termina', () => {
+    const rm = new RoomManager();
+    const room = fourRoom(rm);
+    rm.start(room, 0);
+    rm.leave(room.code, 1, 's1');
+    expect(room.game!.status).toBe('playing');
+    rm.leave(room.code, 2, 's2');
+    expect(room.game!.status).toBe('ended');
+    expect(room.game!.result!.points).toHaveLength(3);
+  });
+
+  it('revancha parcial: sigue solo con quienes siguen conectados', () => {
+    const rm = new RoomManager();
+    const room = fourRoom(rm);
+    rm.start(room, 0);
+    room.game!.status = 'ended';
+    room.game!.result = { winners: [2], reason: 'out', points: [5, 9, 0] };
+    rm.disconnect(room.code, 1, 's1');
+    rm.rematch(room, 0);
+    const first = room.game;
+    rm.rematch(room, 2);
+    expect(room.game).not.toBe(first);
+    expect(room.seats.map((s) => s.name)).toEqual(['A', 'P2']);
+    expect(room.game!.numPlayers).toBe(2);
+  });
+
+  it('sin límite de tiempo, un jugador desconectado en su turno roba tras 60 s', () => {
+    let t = 0;
+    const rm = new RoomManager(() => t);
+    const room = fourRoom(rm);
+    rm.start(room, 0);
+    const g = room.game!;
+    const cur = g.turn;
+    rm.disconnect(room.code, cur, `s${cur}`);
+    t += 30_000;
+    expect(rm.tick(room)).toBe(false);
+    t += 31_000;
+    expect(rm.tick(room)).toBe(true);
+    expect(g.turn).toBe((cur + 1) % 3);
+    expect(g.racks[cur]).toHaveLength(15);
   });
 });

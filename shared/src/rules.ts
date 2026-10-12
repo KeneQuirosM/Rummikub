@@ -187,11 +187,11 @@ export function applyTurn(ctx: TurnContext, end: TurnSnapshot): RuleResult<TurnO
 }
 
 /** Puntuación final cuando se acaba el pozo o alguien gana. */
-export function scoring(racks: readonly (readonly TileId[])[]): { points: number[]; winner: number | null } {
+export function scoring(racks: readonly (readonly TileId[])[]): { points: number[]; winners: number[] } {
   const points = racks.map((r) => rackPoints(r));
   const empty = racks.findIndex((r) => r.length === 0);
-  if (empty >= 0) return { points, winner: empty };
+  if (empty >= 0) return { points, winners: [empty] };
   const min = Math.min(...points);
   const winners = points.map((p, i) => (p === min ? i : -1)).filter((i) => i >= 0);
-  return { points, winner: winners.length === 1 ? winners[0]! : null };
+  return { points, winners };
 }

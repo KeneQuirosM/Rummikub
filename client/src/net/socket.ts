@@ -108,7 +108,12 @@ export class SocketTransport implements Transport {
     );
   }
 
-  intent(i: Intent): Promise<Ack> {
+  /** El anfitrión empieza la partida (2 a 4 jugadores). */
+  start(): Promise<Ack> {
+    return new Promise((resolve) => this.socket.emit('room:start', resolve));
+  }
+
+    intent(i: Intent): Promise<Ack> {
     return new Promise((resolve) => {
       if (!this.socket.connected) return resolve({ ok: false, error: 'NOT_IN_ROOM' });
       this.socket.timeout(10000).emit('game:intent', i, (err: Error | null, r: Ack) => resolve(err ? { ok: false, error: 'NOT_IN_ROOM' } : r));

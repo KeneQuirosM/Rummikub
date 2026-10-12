@@ -46,8 +46,9 @@ describe('bot', () => {
     expect(plan.play).toBe(true);
   });
   it('partidas completas bot vs bot terminan sin errores', () => {
-    for (let seed = 1; seed <= 8; seed++) {
-      const g = createGame({ seed, turnSeconds: 0 });
+    // 2, 3 y 4 jugadores
+    for (let seed = 1; seed <= 9; seed++) {
+      const g = createGame({ seed, turnSeconds: 0, players: 2 + (seed % 3) });
       let turns = 0;
       while (g.status === 'playing' && turns < 400) {
         const seat = g.turn;
@@ -62,7 +63,7 @@ describe('bot', () => {
         expect(r).toEqual({ ok: true });
         turns++;
         // Invariantes: 106 fichas siempre
-        const total = g.pool.length + g.racks[0].length + g.racks[1].length + g.table.reduce((s, m) => s + m.tiles.length, 0);
+        const total = g.pool.length + g.racks.flat().length + g.table.reduce((s, m) => s + m.tiles.length, 0);
         expect(total).toBe(106);
         expect(g.table.every((m) => isValidMeld(m.tiles))).toBe(true);
       }

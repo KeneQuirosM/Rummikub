@@ -14,29 +14,51 @@ import {
 } from '@rummi/shared';
 import { Emitter, type Transport, type TransportEvents } from './transport';
 
-const BOT_NAMES = ['Robo', 'Tito Bot', 'Fichatron'];
+const BOTS = [
+  { name: 'Robo', avatar: '🤖' },
+  { name: 'Fichatron', avatar: '👾' },
+  { name: 'Tito Bot', avatar: '🦾' },
+  { name: 'Byte', avatar: '🛸' },
+];
 
 /**
- * Práctica local: el mismo motor del servidor corriendo en el navegador, con el bot como rival.
+ * Práctica local: el mismo motor del servidor corriendo en el navegador, contra 1 a 3 bots.
+ * El jugador humano siempre es el asiento 0.
  */
 export class LocalTransport implements Transport {
   readonly kind = 'local' as const;
   private em = new Emitter<TransportEvents>();
   private game: GameState;
-  private wins: [number, number] = [0, 0];
+  private wins: number[];
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private tick: ReturnType<typeof setInterval>;
   private botBusy = false;
-  private botName = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)]!;
+  private bots: { name: string; avatar: string }[];
+  private counted = false;
+  private gamesPlayed = 1;
   private disposed = false;
   lastState: PlayerView | null = null;
 
-  constructor(private profile: { name: string; avatar: string }, private turnSeconds: number, seed?: number) {
-    this.game = createGame({ turnSeconds, firstPlayer: 0, ...(seed !== undefined ? { seed } : {}) });
+  constructor(
+    private profile: { name: string; avatar: string },
+    private turnSeconds: number,
+    botCount = 1,
+    seed?: number,
+  ) {
+    const n = Math.max(1, Math.min(3, botCount));
+    const pool = [...BOTS].sort(() => Math.random() - 0.5);
+    this.bots = pool.slice(0, n);
+    this.wins = new Array<number>(n + 1).fill(0);
+    this.game = this.newGame(0, seed);
     this.tick = setInterval(() => {
       if (checkTimeout(this.game)) this.publish();
     }, 500);
     this.later(() => this.publish(), 0);
+  }
+
+  private newGame(first: number, seed?: number): GameState {
+    this.counted = false;
+    return createGame({ players: this.bots.length + 1, turnSeconds: this.turnSeconds, firstPlayer: first, ...(seed !== undefined ? { seed } : {}) });
   }
 
   private later(f: () => void, ms: number) {
@@ -51,43 +73,49 @@ export class LocalTransport implements Transport {
     return viewFor(this.game, 0, {
       roomCode: 'BOT',
       players: [
-        { name: this.profile.name, avatar: this.profile.avatar, connected: true, isBot: false, wins: this.wins[0] },
-        { name: this.botName, avatar: '🤖', connected: true, isBot: true, wins: this.wins[1] },
+        { name: this.profile.name, avatar: this.profile.avatar, connected: true, isBot: false, wins: this.wins[0]! },
+        ...this.bots.map((b, i) => ({ ...b, connected: true, isBot: true, wins: this.wins[i + 1]! })),
       ],
-      rematch: [false, false],
+      rematch: new Array<boolean>(this.bots.length + 1).fill(false),
+      host: 0,
     });
   }
 
   private publish() {
     if (this.disposed) return;
-    this.lastState = this.view();
-    if (this.game.status === 'ended' && this.game.result && !(this.game as { counted?: boolean }).counted) {
-      (this.game as { counted?: boolean }).counted = true;
-      if (this.game.result.winner !== null) this.wins[this.game.result.winner]++;
+    const g = this.game;
+    if (g.status === 'ended' && g.result && !this.counted) {
+      this.counted = true;
+      for (const w of g.result.winners) this.wins[w] = (this.wins[w] ?? 0) + 1;
     }
-    this.em.emit('state', this.view());
-    if (this.game.status === 'playing' && this.game.turn === 1 && !this.botBusy) this.runBot();
+    this.lastState = this.view();
+    this.em.emit('state', this.lastState);
+    if (g.status === 'playing' && g.turn !== 0 && !this.botBusy) this.runBot();
   }
 
+  /** El bot en turno piensa y juega movimiento a movimiento (se ve la animación). */
   private runBot() {
     this.botBusy = true;
     const g = this.game;
+    const seat = g.turn;
     const plan = planBotTurn(turnContext(g));
     const steps = [...plan.moves];
     const step = () => {
-      if (this.disposed || g !== this.game || g.status !== 'playing' || g.turn !== 1) {
+      if (this.disposed || g !== this.game || g.status !== 'playing' || g.turn !== seat) {
         this.botBusy = false;
         return;
       }
       const m = steps.shift();
       if (m) {
         const intent = botMoveToIntent(m, g.working.table);
-        if (intent) applyIntent(g, 1, intent);
-        this.em.emit('state', this.view());
+        if (intent) applyIntent(g, seat, intent);
+        this.lastState = this.view();
+        this.em.emit('state', this.lastState);
         this.later(step, 380);
         return;
       }
-      applyIntent(g, 1, { type: plan.play ? 'endTurn' : 'draw' });
+      const r = applyIntent(g, seat, { type: plan.play ? 'endTurn' : 'draw' });
+      if (!r.ok) applyIntent(g, seat, { type: 'draw' });
       this.botBusy = false;
       this.publish();
     };
@@ -96,7 +124,6 @@ export class LocalTransport implements Transport {
 
   async intent(i: Intent): Promise<Ack> {
     const r = applyIntent(this.game, 0, i);
-    // Publicar en el siguiente microtask para imitar el orden red: state y luego ack
     this.publish();
     return r;
   }
@@ -106,7 +133,8 @@ export class LocalTransport implements Transport {
   emote(e: string): void {
     this.em.emit('emote', { from: 0, emoji: e });
     const replies = ['😎', '🤔', '👍', '😂'];
-    this.later(() => this.em.emit('emote', { from: 1, emoji: replies[Math.floor(Math.random() * replies.length)]! }), 1200);
+    const who = 1 + Math.floor(Math.random() * this.bots.length);
+    this.later(() => this.em.emit('emote', { from: who, emoji: replies[Math.floor(Math.random() * replies.length)]! }), 1200);
   }
 
   chat(text: string): void {
@@ -115,7 +143,8 @@ export class LocalTransport implements Transport {
   }
 
   rematch(): void {
-    this.game = createGame({ turnSeconds: this.turnSeconds, firstPlayer: (this.wins[0] + this.wins[1]) % 2 === 0 ? 0 : 1 });
+    // Alterna quién empieza
+    this.game = this.newGame(this.gamesPlayed++ % (this.bots.length + 1));
     this.botBusy = false;
     this.publish();
   }

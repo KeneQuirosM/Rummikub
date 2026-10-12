@@ -59,7 +59,9 @@
       <div class="card lobby-card">
         <p class="muted" data-i18n="room.code"></p>
         <div class="room-code" id="lobby-code">ABCD</div>
-        <p class="waiting"><span class="dots"></span> <span data-i18n="room.waiting"></span></p>
+        <ul class="lobby-players" id="lobby-players"></ul>
+        <p class="waiting"><span class="dots"></span> <span id="lobby-status" data-i18n="room.waiting"></span></p>
+        <button class="btn btn-gold btn-lg" id="btn-start" hidden></button>
         <button class="btn btn-whatsapp btn-lg" id="btn-share"><span class="ico">💬</span><span data-i18n="room.share"></span></button>
         <button class="btn" id="btn-copy"><span class="ico">🔗</span><span data-i18n="room.copy"></span></button>
         <button class="btn btn-ghost" id="btn-lobby-leave" data-i18n="room.leave"></button>
@@ -70,26 +72,22 @@
     <section id="hud" hidden>
       <header class="hud-top">
         <button class="icon-btn" id="btn-menu" data-i18n-title="btn.menu">☰</button>
-        <div class="opp" id="opp">
-          <span class="avatar" id="opp-avatar">🐼</span>
-          <div class="opp-info">
-            <div class="opp-name"><i class="dot" id="opp-dot"></i><span id="opp-name">Rival</span></div>
-            <div class="opp-sub"><span id="opp-count">14</span> <span data-i18n="hud.tiles"></span><span id="opp-status" class="opp-status"></span></div>
-          </div>
-        </div>
+        <div class="opps" id="opps"></div>
         <div class="turn" id="turn">
           <svg class="ring" viewBox="0 0 36 36" aria-hidden="true"><circle cx="18" cy="18" r="15.5" class="ring-bg"/><circle cx="18" cy="18" r="15.5" class="ring-fg" id="ring-fg"/></svg>
           <span class="turn-time" id="turn-time">60</span>
         </div>
-        <div class="pool" data-i18n-title="hud.pool"><span class="pool-ico">🀫</span><span id="pool-count">78</span></div>
-        <button class="icon-btn" id="btn-emote" data-i18n-title="btn.emote">😀</button>
-        <button class="icon-btn" id="btn-chat" data-i18n-title="btn.chat">💬<i class="badge" id="chat-badge" hidden></i></button>
       </header>
       <div class="turn-label" id="turn-label"></div>
       <div class="opening" id="opening" hidden></div>
       <div class="side-tools">
         <button class="icon-btn" id="btn-recenter" data-i18n-title="btn.recenter">⌖</button>
         <button class="icon-btn" id="btn-mute" data-i18n-title="btn.sound">🔊</button>
+      </div>
+      <div class="side-tools right">
+        <div class="pool" data-i18n-title="hud.pool"><span class="pool-ico">🀫</span><span id="pool-count">78</span></div>
+        <button class="icon-btn" id="btn-emote" data-i18n-title="btn.emote">😀</button>
+        <button class="icon-btn" id="btn-chat" data-i18n-title="btn.chat">💬<i class="badge" id="chat-badge" hidden></i></button>
       </div>
       <div class="actions" id="actions">
         <button class="act" id="act-undo"><span class="ico">↶</span><span data-i18n="btn.undo"></span></button>

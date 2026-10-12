@@ -24,7 +24,7 @@ export interface ControllerEvents {
 function turnCtx(v: PlayerView): TurnContext {
   return {
     start: { rack: [...v.rack, ...v.playedThisTurn], table: [{ id: '__start', tiles: v.turnStartTable }] },
-    opened: v.players[v.you].opened,
+    opened: v.players[v.you]!.opened,
   };
 }
 
@@ -72,7 +72,7 @@ export class GameController {
   }
 
   get opened(): boolean {
-    return !!this.view && this.view.players[this.view.you].opened;
+    return !!this.view && this.view.players[this.view.you]!.opened;
   }
 
   openingPoints(): number {
