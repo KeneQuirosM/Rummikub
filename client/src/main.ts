@@ -4,7 +4,7 @@ import { unlockAudio } from './audio';
 import { applyI18n, setLang, t } from './i18n';
 import type { Transport } from './net/transport';
 import { getSessionToken, onSettingsChange, profile, settings } from './settings';
-import { $, banner, closeAllModals, confirmDialog, show, toast } from './ui/dom';
+import { $, banner, closeAllModals, confirmDialog, modal, show, toast } from './ui/dom';
 import { openHowTo, openJoin, openProfile, openSettings } from './ui/menus';
 import type { Engine } from './three/engine';
 import type { BoardScene } from './three/board';
@@ -271,8 +271,7 @@ async function startGame(transport: Transport, initial?: PlayerView) {
   void enterImmersive();
 }
 
-async function openGameMenu() {
-  const { modal } = await import('./ui/dom');
+function openGameMenu() {
   const m = modal(`
     <h2>${t('btn.menu')}</h2>
     <div class="menu-list" style="margin:0">
@@ -375,5 +374,23 @@ window.__rummi = {
   view: () => session?.ctl.view ?? null,
   rackOrder: () => session?.ctl.rackOrder ?? [],
 };
+
+// Solo en desarrollo: juega automáticamente mi turno con la IA (para probar finales de partida)
+if (import.meta.env.DEV) {
+  (window as unknown as { __autoplay: () => Promise<void> }).__autoplay = async () => {
+    const { planBotTurn, botMoveToIntent } = await import('@rummi/shared');
+    const s = session;
+    const v = s?.ctl.view;
+    if (!s || !v || v.turn !== v.you || v.status !== 'playing') return;
+    const plan = planBotTurn({ start: { rack: v.rack, table: v.table }, opened: v.players[v.you].opened });
+    for (const m of plan.moves) {
+      const i = botMoveToIntent(m, s.ctl.view!.table);
+      if (i && i.type === 'move') s.ctl.move(i.tileId, i.to);
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    if (plan.play) s.ctl.endTurn();
+    else s.ctl.draw();
+  };
+}
 
 void boot();

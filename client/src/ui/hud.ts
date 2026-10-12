@@ -236,7 +236,7 @@ export class GameHud {
         else if (e.player !== v.you) toast(t('game.drew', { name: oppName }));
         break;
       case 'play':
-        if (e.player !== v.you) toast(t('game.played', { name: oppName, n: e.tiles.length }));
+        if (e.player !== v.you) toast(t(e.tiles.length === 1 ? 'game.played1' : 'game.played', { name: oppName, n: e.tiles.length }));
         else sfx.valid();
         break;
       case 'end':

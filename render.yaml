@@ -1,0 +1,13 @@
+# Render Blueprint: Dashboard -> New -> Blueprint -> este repo
+services:
+  - type: web
+    name: rummi3d
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: CORS_ORIGINS
+        sync: false

@@ -1,0 +1,19 @@
+# Cliente estático en Netlify. Definir VITE_SERVER_URL (URL del servidor Socket.IO) en el panel.
+[build]
+  base = "/"
+  command = "npm ci && npm run build -w client"
+  publish = "client/dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"
