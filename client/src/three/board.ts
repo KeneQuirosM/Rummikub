@@ -95,6 +95,7 @@ export class BoardScene implements EngineScene {
   private rackOrder: TileId[] = [];
   private layout: TableLayout = layoutTable([], 12);
   private rowWidth = 12;
+  private baseRowWidth = 12;
   private loc = new Map<TileId, Loc>();
   private meldValid = new Map<string, boolean>();
   private selected: TileId | null = null;
@@ -219,12 +220,40 @@ export class BoardScene implements EngineScene {
     // Ancho de filas de la mesa según orientación
     const mainH = Math.max(1, h - this.rackH);
     const aspect = w / mainH;
-    this.rowWidth = aspect < 0.9 ? 10.8 : aspect < 1.4 ? 14 : 18;
+    this.baseRowWidth = aspect < 0.9 ? 10.8 : aspect < 1.4 ? 14 : 18;
+    this.rowWidth = this.baseRowWidth;
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
     if (this.view) this.sync(this.view, this.rackOrder, false);
     else this.applyCamera();
     this.engine.invalidate();
+  }
+
+  /**
+   * Elige el ancho de fila que mejor aprovecha la pantalla: en vertical, cuando la mesa crece,
+   * conviene ensanchar las filas en vez de apilar una columna altísima de combinaciones.
+   */
+  private chooseRowWidth(view: PlayerView): number {
+    const usableW = Math.max(80, this.w - this.insets.right);
+    const usableH = Math.max(80, this.mainH - this.insets.top - this.insets.bottom);
+    const cost = (rw: number) => {
+      const L = layoutTable(view.table, rw);
+      const width = Math.max(L.maxX - L.minX, rw) + 1;
+      const depth = (L.maxZ - L.minZ + 3.5) * Math.sin(EL);
+      return Math.max(width / usableW, depth / usableH);
+    };
+    let best = this.baseRowWidth;
+    let bestCost = cost(best);
+    for (let rw = this.baseRowWidth + 1.6; rw <= 28; rw += 1.6) {
+      const c = cost(rw);
+      if (c < bestCost * 0.97) {
+        best = rw;
+        bestCost = c;
+      }
+    }
+    // Histéresis: mantener el ancho actual si es casi igual de bueno (evita que la mesa se reacomode sin parar)
+    if (this.rowWidth !== best && cost(this.rowWidth) <= bestCost * 1.08) return this.rowWidth;
+    return best;
   }
 
   get mainH() {
@@ -255,7 +284,7 @@ export class BoardScene implements EngineScene {
       }
       return true;
     };
-    let lo = 5, hi = 60;
+    let lo = 5, hi = 90;
     for (let i = 0; i < 22; i++) {
       const mid = (lo + hi) / 2;
       if (fits(mid)) hi = mid;
@@ -309,6 +338,10 @@ export class BoardScene implements EngineScene {
     this.view = view;
     this.rackOrder = rackOrder;
     const previewMeld = this.drag?.started && this.drag.target?.kind === 'meld' ? this.drag.target : null;
+    // Al cambiar de turno la cámara vuelve a encuadrar toda la mesa
+    if (prevView && prevView.turn !== view.turn) this.userCamera = false;
+    // No cambiar el ancho de filas mientras se arrastra (la mesa "saltaría" bajo el dedo)
+    if (!this.drag?.started) this.rowWidth = this.chooseRowWidth(view);
     this.layout = layoutTable(view.table, this.rowWidth);
     // La cámara nunca se mueve sola mientras se arrastra una ficha
     if (!this.userCamera && !this.drag?.started) this.fitCamera(animate && !newGame);
@@ -352,7 +385,7 @@ export class BoardScene implements EngineScene {
           const idx = others.indexOf(t);
           x = box.x0 + idx * STEP + (idx >= (previewMeld.index ?? 0) ? STEP / 2 : -STEP / 2);
         }
-        const target = { x, y: TILE_H / 2, z: box.z, rx: 0, ry: JITTER(t), rz: 0, s: 1 };
+        const target = { x, y: TILE_H / 2, z: box.z, rx: 0, ry: JITTER(t), rz: 0, s: 1, shadow: -1 };
         const prev = this.loc.get(t) ?? 'none';
         const st = this.tiles.get(t);
         if (prev === 'table' && st.visible) {
@@ -662,7 +695,7 @@ export class BoardScene implements EngineScene {
       const [a, b] = [...this.pointers.values()];
       const d = Math.hypot(a!.x - b!.x, a!.y - b!.y);
       if (g.dist > 0) {
-        this.cam.dist = Math.max(6, Math.min(40, (this.cam.dist * g.dist) / d));
+        this.cam.dist = Math.max(6, Math.min(70, (this.cam.dist * g.dist) / d));
         this.userCamera = true;
         this.applyCamera();
       }
@@ -670,13 +703,22 @@ export class BoardScene implements EngineScene {
       return;
     }
     if (g?.kind === 'pan') {
+      // Umbral: un roce o un toque no cuenta como mover la cámara
+      const gg = g as { downX?: number; downY?: number; panning?: boolean };
+      if (!gg.panning) {
+        if (Math.hypot(p.x - (gg.downX ?? p.x), p.y - (gg.downY ?? p.y)) < 12) return;
+        gg.panning = true;
+        g.lastX = p.x;
+        g.lastY = p.y;
+        return;
+      }
       const dx = p.x - g.lastX, dy = p.y - g.lastY;
       g.lastX = p.x;
       g.lastY = p.y;
       const worldPerPx = (2 * this.cam.dist * Math.tan(THREE.MathUtils.degToRad(FOV / 2))) / this.mainH;
-      this.cam.tx = Math.max(-20, Math.min(20, this.cam.tx - dx * worldPerPx));
-      this.cam.tz = Math.max(-16, Math.min(16, this.cam.tz - (dy * worldPerPx) / Math.sin(EL)));
-      if (Math.abs(dx) + Math.abs(dy) > 0) this.userCamera = true;
+      this.cam.tx = Math.max(-30, Math.min(30, this.cam.tx - dx * worldPerPx));
+      this.cam.tz = Math.max(-30, Math.min(30, this.cam.tz - (dy * worldPerPx) / Math.sin(EL)));
+      this.userCamera = true;
       this.applyCamera();
       return;
     }
@@ -956,7 +998,7 @@ export class BoardScene implements EngineScene {
       this.scrollRack(e.deltaY + e.deltaX);
       return;
     }
-    this.cam.dist = Math.max(6, Math.min(40, this.cam.dist * (1 + e.deltaY * 0.0012)));
+    this.cam.dist = Math.max(6, Math.min(70, this.cam.dist * (1 + e.deltaY * 0.0012)));
     this.userCamera = true;
     this.applyCamera();
   };
