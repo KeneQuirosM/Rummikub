@@ -31,6 +31,8 @@ export class GameHud {
   private lastTurnMine: boolean | null = null;
   private chatOpen = false;
   private replacedSeen = new Set<number>();
+  private relayoutTimers: ReturnType<typeof setTimeout>[] = [];
+  private layoutQueued = false;
 
   constructor(private ctl: GameController, private board: BoardScene, private opts: HudOptions) {
     this.root.hidden = false;
@@ -100,8 +102,37 @@ export class GameHud {
     this.offs.push(() => form.removeEventListener('submit', submit));
 
     window.addEventListener('keydown', this.onKey);
-    window.addEventListener('resize', this.layout);
-    this.offs.push(() => window.removeEventListener('keydown', this.onKey), () => window.removeEventListener('resize', this.layout));
+    // Al girar el teléfono los tamaños llegan en varios pasos (sobre todo en iOS): re-medir varias veces
+    const relayout = () => {
+      this.relayoutTimers.forEach(clearTimeout);
+      this.relayoutTimers = [];
+      this.layout();
+      requestAnimationFrame(this.layout);
+      for (const ms of [150, 400, 900]) this.relayoutTimers.push(setTimeout(this.layout, ms));
+    };
+    window.addEventListener('resize', relayout);
+    window.addEventListener('orientationchange', relayout);
+    window.visualViewport?.addEventListener('resize', relayout);
+    // Cuando la escena cambia de tamaño por su cuenta, el CSS del atril debe seguirla
+    board.onLayout = () => {
+      document.documentElement.style.setProperty('--rack-h', `${board.rackH}px`);
+      this.updateRackArrows();
+      if (!this.layoutQueued) {
+        this.layoutQueued = true;
+        requestAnimationFrame(() => {
+          this.layoutQueued = false;
+          this.layout();
+        });
+      }
+    };
+    this.offs.push(
+      () => window.removeEventListener('keydown', this.onKey),
+      () => window.removeEventListener('resize', relayout),
+      () => window.removeEventListener('orientationchange', relayout),
+      () => window.visualViewport?.removeEventListener('resize', relayout),
+      () => this.relayoutTimers.forEach(clearTimeout),
+      () => (board.onLayout = () => {}),
+    );
     this.timer = setInterval(() => this.tickTimer(), 250);
     $('chat-log').innerHTML = '';
     $('floaters').innerHTML = '';

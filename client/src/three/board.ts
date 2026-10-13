@@ -189,9 +189,17 @@ export class BoardScene implements EngineScene {
 
   // ---------------------------------------------------------------- layout & camera
 
+  /** Se llama tras cada cambio de tamaño/insets (el HUD ajusta el CSS del atril). */
+  onLayout: () => void = () => {};
+
   setInsets(i: BoardInsets) {
-    this.insets = i;
-    this.resize(this.w, this.h);
+    const same = (Object.keys(i) as (keyof BoardInsets)[]).every((k) => Math.abs(i[k] - this.insets[k]) < 0.5);
+    // Leer el tamaño REAL del canvas: tras girar el teléfono, el evento resize de la ventana
+    // puede llegar antes de que el motor 3D se haya redimensionado
+    this.engine.resize();
+    if (same && this.w === this.engine.width && this.h === this.engine.height) return;
+    this.insets = { ...i };
+    this.resize(this.engine.width, this.engine.height);
   }
 
   resize(w: number, h: number) {
@@ -236,6 +244,7 @@ export class BoardScene implements EngineScene {
     if (this.view) this.sync(this.view, this.rackOrder, false);
     else this.applyCamera();
     this.engine.invalidate();
+    this.onLayout();
   }
 
   /**
@@ -553,7 +562,9 @@ export class BoardScene implements EngineScene {
       const base = k * BACKS_PER_OPP;
       const active = view.status === 'playing' && view.turn === o.seat;
       const [r, g, b] = active ? TINT_ACTIVE : TINT_NORMAL;
-      const perLine = o.side === 'top' ? Math.max(1, Math.floor(Math.max(5, this.rowWidth - 3.2) / BACK_STEP)) : Math.max(1, Math.floor(colLen / BACK_STEP));
+      const maxPerLine = o.side === 'top' ? Math.max(1, Math.floor(Math.max(5, this.rowWidth - 3.2) / BACK_STEP)) : Math.max(1, Math.floor(colLen / BACK_STEP));
+      // Repartir parejo entre líneas (9 fichas -> 5 + 4, no 8 + 1)
+      const perLine = Math.ceil(n / Math.max(1, Math.ceil(n / maxPerLine)));
       for (let i = 0; i < n; i++) {
         const line = Math.floor(i / perLine);
         const inLine = Math.min(perLine, n - line * perLine);

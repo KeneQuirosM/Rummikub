@@ -178,3 +178,36 @@ test('tres jugadores en la misma mesa: turnos rotativos y sincronización', asyn
     })
     .toBe(true);
 });
+
+test('girar el celular (vertical ↔ horizontal) no deja botones encima del atril', async ({ browser }) => {
+  const P = await player(browser, 'Giro', true);
+  await P.setViewportSize({ width: 390, height: 664 });
+  await P.goto('/');
+  await P.click('#btn-practice');
+  await P.click('.bots-pick button[data-n="2"]');
+  await expect(P.locator('#hud')).toBeVisible();
+  const layoutProblems = () =>
+    P.evaluate(() => {
+      const w = window as unknown as { __rummi: { rackH(): number | null } };
+      const css = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--rack-h'));
+      const rackH = w.__rummi.rackH()!;
+      const rackTop = innerHeight - rackH;
+      const out: string[] = [];
+      if (Math.abs(css - rackH) > 1) out.push(`--rack-h ${css} != ${rackH}`);
+      for (const id of ['act-undo', 'act-sort', 'act-draw', 'act-end', 'turn']) {
+        const b = document.getElementById(id)!.getBoundingClientRect();
+        if (b.bottom > rackTop + 1) out.push(`${id} sobre el atril`);
+        if (b.right > innerWidth || b.left < 0 || b.top < 0) out.push(`${id} fuera de pantalla`);
+      }
+      return out;
+    });
+  for (const size of [
+    { width: 844, height: 340 },
+    { width: 390, height: 664 },
+    { width: 932, height: 380 },
+    { width: 430, height: 740 },
+  ]) {
+    await P.setViewportSize(size);
+    await expect.poll(layoutProblems, { timeout: 5_000 }).toEqual([]);
+  }
+});

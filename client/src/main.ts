@@ -451,12 +451,13 @@ function registerServiceWorker() {
 // Exponer estado para tests e2e (solo lectura)
 declare global {
   interface Window {
-    __rummi?: { view(): PlayerView | null; rackOrder(): number[] };
+    __rummi?: { view(): PlayerView | null; rackOrder(): number[]; rackH(): number | null };
   }
 }
 window.__rummi = {
   view: () => session?.ctl.view ?? null,
   rackOrder: () => session?.ctl.rackOrder ?? [],
+  rackH: () => session?.board.rackH ?? null,
 };
 
 // Solo en desarrollo: juega automáticamente mi turno con la IA (para probar finales de partida)
