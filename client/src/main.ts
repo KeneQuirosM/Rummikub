@@ -3,7 +3,8 @@ import { MAX_PLAYERS, ROOM_CODE_REGEX, type PlayerView } from '@rummi/shared';
 import { unlockAudio } from './audio';
 import { applyI18n, setLang, t } from './i18n';
 import type { Transport } from './net/transport';
-import { getSessionToken, onSettingsChange, profile, settings } from './settings';
+import { getSessionToken, onSettingsChange, profile, settings, updateSettings } from './settings';
+import { GameStatsTracker } from './stats';
 import { $, banner, closeAllModals, confirmDialog, escapeHtml, modal, show, toast } from './ui/dom';
 import { openHowTo, openJoin, openProfile, openSettings } from './ui/menus';
 import type { Engine } from './three/engine';
@@ -93,6 +94,7 @@ function bindMenu() {
   $('btn-join').addEventListener('click', () => openJoin((c) => void joinRoom(c)));
   // La primera vez va directo al tutorial (1 vs 1); después se elige cuántos bots
   $('btn-practice').addEventListener('click', () => (settings.tutorialDone ? choosePractice() : void startPractice()));
+  $('btn-stats').addEventListener('click', () => void import('./ui/statsView').then((m) => m.openStats()));
   $('btn-settings').addEventListener('click', () => openSettings({ onTutorial: () => void startPractice(true) }));
   $('btn-howto').addEventListener('click', () => openHowTo(() => void startPractice(true)));
   $('profile-chip').addEventListener('click', () => openProfile(refreshProfileChip));
@@ -260,17 +262,31 @@ async function joinRoom(code: string) {
 
 // ------------------------------------------------------------------ práctica
 
-/** Elegir contra cuántos bots (1 a 3) jugar la práctica. */
+/** Elegir contra cuántos bots (1 a 3) y con qué dificultad jugar la práctica. */
 function choosePractice() {
+  let level = settings.botLevel;
   const m = modal(`
     <h2>${t('practice.title')}</h2>
+    <p class="muted" style="margin:0 0 6px">${t('practice.level')}</p>
+    <div class="seg level-seg" data-seg="level">
+      ${(['easy', 'normal', 'hard'] as const).map((l) => `<button type="button" data-v="${l}" class="${l === level ? 'on' : ''}">${t(`practice.${l}`)}</button>`).join('')}
+    </div>
+    <p class="muted level-hint" id="level-hint">${t(`practice.${level}Hint`)}</p>
     <div class="bots-pick">
       ${[1, 2, 3].map((n) => `<button type="button" data-n="${n}"><b>${n}</b><span>🤖 ${n === 1 ? t('practice.rival') : t('practice.rivals')}</span></button>`).join('')}
     </div>
     <div class="actions-row"><button class="btn" data-close>${t('common.cancel')}</button></div>`);
+  m.el.querySelector('.level-seg')!.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-v]');
+    if (!b) return;
+    level = b.dataset.v as typeof level;
+    m.el.querySelectorAll('.level-seg button').forEach((x) => x.classList.toggle('on', x === b));
+    m.el.querySelector('#level-hint')!.textContent = t(`practice.${level}Hint`);
+  });
   m.el.querySelector('.bots-pick')!.addEventListener('click', (e) => {
     const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-n]');
     if (!b) return;
+    updateSettings({ botLevel: level });
     m.close();
     void startPractice(false, Number(b.dataset.n));
   });
@@ -278,7 +294,8 @@ function choosePractice() {
 
 async function startPractice(forceTutorial = false, bots = 1) {
   const { LocalTransport } = await import('./net/local');
-  const tr = new LocalTransport(profile, settings.turnSeconds, bots);
+  // El tutorial siempre contra un bot Normal
+  const tr = new LocalTransport(profile, settings.turnSeconds, bots, forceTutorial || !settings.tutorialDone ? 'normal' : settings.botLevel);
   await startGame(tr);
   if ((forceTutorial || !settings.tutorialDone) && session) {
     const { startTutorial } = await import('./ui/tutorial');
@@ -297,6 +314,7 @@ async function startGame(transport: Transport, initial?: PlayerView) {
   const ctl = new mods.GameController(transport);
   const board: BoardScene = new mods.BoardScene(engine, {
     move: (tile, to, rackIndex) => ctl.move(tile, to, rackIndex),
+    moveMeld: (meldId, to) => ctl.moveMeld(meldId, to),
     reorder: (tile, index) => ctl.reorderRack(tile, index),
     drag: (d) => transport.drag(d),
     notMyTurn: () => toast(t('err.NOT_YOUR_TURN'), 'error'),
@@ -306,8 +324,16 @@ async function startGame(transport: Transport, initial?: PlayerView) {
     onMenu: () => openGameMenu(),
     onLeave: () => leaveGame(),
   });
+  // Estadísticas locales: registra cada partida al terminar
+  const botLevel = (transport as { level?: 'easy' | 'normal' | 'hard' }).level;
+  const tracker = new GameStatsTracker(transport.kind === 'local' ? 'bot' : 'online', botLevel);
   const offs: (() => void)[] = [
     ctl.em.on('change', (v) => board.sync(v, ctl.rackOrder, true)),
+    ctl.em.on('change', (v) => tracker.onView(v)),
+    ctl.em.on('gameEvent', (e, v) => {
+      if (e.type === 'start') tracker.onStart();
+      else if (e.type === 'play') tracker.onPlay(e.player, e.tiles.length, v.you);
+    }),
     transport.on('drag', (d) => board.showGhost(d)),
     transport.on('status', (s) => {
       if (s === 'connected') {
@@ -451,13 +477,19 @@ function registerServiceWorker() {
 // Exponer estado para tests e2e (solo lectura)
 declare global {
   interface Window {
-    __rummi?: { view(): PlayerView | null; rackOrder(): number[]; rackH(): number | null };
+    __rummi?: {
+      view(): PlayerView | null;
+      rackOrder(): number[];
+      rackH(): number | null;
+      tilePos(t: number): { x: number; y: number } | null;
+    };
   }
 }
 window.__rummi = {
   view: () => session?.ctl.view ?? null,
   rackOrder: () => session?.ctl.rackOrder ?? [],
   rackH: () => session?.board.rackH ?? null,
+  tilePos: (t: number) => session?.board.screenPosOfTile(t) ?? null,
 };
 
 // Solo en desarrollo: juega automáticamente mi turno con la IA (para probar finales de partida)

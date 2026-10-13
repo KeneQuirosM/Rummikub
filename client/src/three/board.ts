@@ -16,6 +16,8 @@ import { TILE_D, TILE_H, TILE_W, TileSet, type TileState } from './tileset';
 
 export interface BoardCallbacks {
   move(tileId: TileId, to: MoveTarget, rackIndex?: number): boolean;
+  /** Mover una combinación entera. */
+  moveMeld(meldId: string, to: MoveTarget): boolean;
   reorder(tileId: TileId, index: number): void;
   drag(d: DragPayload): void;
   notMyTurn(): void;
@@ -50,7 +52,17 @@ interface DragState {
   target: DropTarget | null;
   rackIndex: number;
   lastSent: number;
+  /** Arrastre de combinación entera: fichas en orden y combinación de origen. */
+  group: TileId[] | null;
+  groupMeld: string | null;
+  /** Shift en escritorio: arrastrar como grupo desde el primer movimiento. */
+  wantGroup: boolean;
+  lastX: number;
+  lastY: number;
 }
+
+/** Tiempo de pulsación para levantar la combinación entera. */
+const HOLD_MS = 420;
 
 const EL = THREE.MathUtils.degToRad(58); // elevación de la cámara
 const FOV = 38;
@@ -111,7 +123,8 @@ export class BoardScene implements EngineScene {
   private drag: DragState | null = null;
   private pointers = new Map<number, { x: number; y: number }>();
   private gesture: { kind: 'pan' | 'pinch' | 'scroll'; lastX: number; lastY: number; dist: number } | null = null;
-  private cam = { tx: 0, tz: 0, dist: 18 };
+  private cam = { tx: 0, tz: 0, dist: 18, yaw: 0 };
+  private cinema: { tl: gsap.core.Timeline; done: () => void; tiles: TileId[] } | null = null;
   private userCamera = false;
   private ray = new THREE.Raycaster();
   private plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -281,11 +294,12 @@ export class BoardScene implements EngineScene {
     const fit = this.view
       ? this.computeFit(this.layout, this.rowWidth, this.backsExtents(this.view, this.layout, this.rowWidth))
       : { tx: 0, tz: 0, dist: 18 };
-    this.placeCamera(this.cam.tx, this.cam.tz, this.cam.dist);
+    this.placeCamera(this.cam.tx, this.cam.tz, this.cam.dist, this.cam.yaw);
+    if (this.cinema) return; // durante la cinemática manda la cinemática
     if (animate) {
-      gsap.to(this.cam, { ...fit, duration: 0.5, ease: 'power2.inOut', onUpdate: () => this.applyCamera() });
+      gsap.to(this.cam, { ...fit, yaw: 0, duration: 0.5, ease: 'power2.inOut', onUpdate: () => this.applyCamera() });
     } else {
-      Object.assign(this.cam, fit);
+      Object.assign(this.cam, fit, { yaw: 0 });
       this.applyCamera();
     }
   }
@@ -323,7 +337,7 @@ export class BoardScene implements EngineScene {
       if (fits(mid)) hi = mid;
       else lo = mid;
     }
-    this.placeCamera(saved.tx, saved.tz, saved.dist);
+    this.placeCamera(saved.tx, saved.tz, saved.dist, saved.yaw);
     return { tx, tz, dist: hi };
   }
 
@@ -356,12 +370,14 @@ export class BoardScene implements EngineScene {
     this.fitCamera(true);
   }
 
-  private placeCamera(tx: number, tz: number, dist: number) {
+  private placeCamera(tx: number, tz: number, dist: number, yaw = 0) {
     // La niebla acompaña a la cámara: la mesa nunca se oscurece al alejarse
     const fog = this.scene.fog as THREE.Fog;
     fog.near = dist + 12;
     fog.far = dist + 50;
-    this.camera.position.set(tx, Math.sin(EL) * dist, tz + Math.cos(EL) * dist);
+    // yaw = giro alrededor de la mesa (solo en la cámara cinemática)
+    const ground = Math.cos(EL) * dist;
+    this.camera.position.set(tx + Math.sin(yaw) * ground, Math.sin(EL) * dist, tz + Math.cos(yaw) * ground);
     this.camera.lookAt(tx, 0, tz);
     // Centrar el contenido en la zona libre entre el HUD superior y la barra inferior
     const shiftY = (this.insets.top - this.insets.bottom) / 2;
@@ -371,7 +387,7 @@ export class BoardScene implements EngineScene {
   }
 
   private applyCamera() {
-    this.placeCamera(this.cam.tx, this.cam.tz, this.cam.dist);
+    this.placeCamera(this.cam.tx, this.cam.tz, this.cam.dist, this.cam.yaw);
     this.engine.invalidate();
   }
 
@@ -451,12 +467,14 @@ export class BoardScene implements EngineScene {
     for (const m of view.table) {
       const box = this.layout.melds.find((b) => b.id === m.id)!;
       m.tiles.forEach((t, i) => {
-        if (this.drag?.started && this.drag.tileId === t) return;
+        if (this.isDragged(t)) return;
         let x = box.x0 + i * STEP;
         if (previewMeld && previewMeld.meldId === m.id) {
-          const others = m.tiles.filter((tt) => tt !== this.drag!.tileId);
+          const others = m.tiles.filter((tt) => !this.isDragged(tt));
           const idx = others.indexOf(t);
-          x = box.x0 + idx * STEP + (idx >= (previewMeld.index ?? 0) ? STEP / 2 : -STEP / 2);
+          // Hueco "magnético" del tamaño de lo que se arrastra (1 ficha o el grupo entero)
+          const gap = (STEP * (this.drag?.group?.length ?? 1)) / 2;
+          x = box.x0 + idx * STEP + (idx >= (previewMeld.index ?? 0) ? gap : -gap);
         }
         const target = { x, y: TILE_H / 2, z: box.z, rx: 0, ry: JITTER(t), rz: 0, s: 1, shadow: -1 };
         const prev = this.loc.get(t) ?? 'none';
@@ -477,7 +495,7 @@ export class BoardScene implements EngineScene {
       });
     }
     // Atril propio
-    const slots = this.rackSlots(rackOrder.filter((t) => !(this.drag?.started && this.drag.tileId === t)), this.drag?.started && this.drag.region === 'rack' ? this.drag.rackIndex : -1);
+    const slots = this.rackSlots(rackOrder.filter((t) => !this.isDragged(t)), this.drag?.started && this.drag.region === 'rack' ? this.drag.rackIndex : -1);
     let dealIdx = 0;
     const dealing = newGame;
     for (const [t, slot] of slots) {
@@ -657,7 +675,7 @@ export class BoardScene implements EngineScene {
     const max = Math.max(0, this.contentWidth() - (this.w - 2 * this.rackPad));
     this.scrollX = Math.max(0, Math.min(max, this.scrollX));
     if (this.view) {
-      const slots = this.rackSlots(this.rackOrder.filter((t) => !(this.drag?.started && this.drag.tileId === t)), -1);
+      const slots = this.rackSlots(this.rackOrder.filter((t) => !this.isDragged(t)), -1);
       for (const [t, s] of slots) this.rackTiles.set(t, { x: s.x, y: s.y });
     }
   }
@@ -743,6 +761,19 @@ export class BoardScene implements EngineScene {
     return this.tiles.raycast(this.ray);
   }
 
+  /** ¿Esta ficha se está arrastrando (sola o como parte de un grupo)? */
+  private isDragged(t: TileId): boolean {
+    const d = this.drag;
+    if (!d?.started) return false;
+    return d.group ? d.group.includes(t) : d.tileId === t;
+  }
+
+  /** ¿Puedo levantar esta combinación entera? (todas sus fichas deben poder moverse) */
+  canMoveMeld(meldId: string): boolean {
+    const m = this.view?.table.find((mm) => mm.id === meldId);
+    return !!m && m.tiles.every((t) => this.canMoveTableTile(t));
+  }
+
   canMoveTableTile(t: TileId): boolean {
     const v = this.view;
     if (!v || v.status !== 'playing' || v.turn !== v.you) return false;
@@ -756,6 +787,7 @@ export class BoardScene implements EngineScene {
     this.engine.canvas.setPointerCapture?.(e.pointerId);
     if (this.pointers.size === 2 && !this.drag?.started) {
       // pinch
+      this.clearHold();
       this.drag = null;
       const [a, b] = [...this.pointers.values()];
       this.gesture = { kind: 'pinch', lastX: 0, lastY: 0, dist: Math.hypot(a!.x - b!.x, a!.y - b!.y) };
@@ -769,8 +801,16 @@ export class BoardScene implements EngineScene {
         tileId: hit, origin: region === 'rack' ? 'rack' : 'table', pointerId: e.pointerId,
         startX: p.x, startY: p.y, started: false, touch: e.pointerType !== 'mouse', region,
         target: null, rackIndex: -1, lastSent: 0,
+        group: null, groupMeld: null, wantGroup: region === 'main' && e.shiftKey, lastX: p.x, lastY: p.y,
       };
       this.gesture = null;
+      // Mantener presionada una ficha de la mesa levanta toda su combinación
+      if (region === 'main') {
+        const d = this.drag;
+        this.holdTimer = setTimeout(() => {
+          if (this.drag === d && !d.started) this.startGroupDrag(d);
+        }, HOLD_MS);
+      }
     } else {
       this.drag = null;
       this.gesture = { kind: region === 'rack' ? 'scroll' : 'pan', lastX: p.x, lastY: p.y, dist: 0 };
@@ -824,8 +864,15 @@ export class BoardScene implements EngineScene {
     }
     const d = this.drag;
     if (!d || d.pointerId !== e.pointerId) return;
+    d.lastX = p.x;
+    d.lastY = p.y;
     if (!d.started) {
       if (Math.hypot(p.x - d.startX, p.y - d.startY) < 8) return;
+      this.clearHold();
+      if (d.wantGroup && this.startGroupDrag(d)) {
+        this.updateDrag(p.x, p.y);
+        return;
+      }
       d.started = true;
       this.select(null);
       sfx.pick();
@@ -834,18 +881,44 @@ export class BoardScene implements EngineScene {
     this.updateDrag(p.x, p.y);
   };
 
+  private holdTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private clearHold() {
+    if (this.holdTimer) clearTimeout(this.holdTimer);
+    this.holdTimer = null;
+  }
+
+  /** Convierte el arrastre en arrastre de grupo (combinación entera). */
+  private startGroupDrag(d: DragState): boolean {
+    this.clearHold();
+    const meld = this.view?.table.find((m) => m.tiles.includes(d.tileId));
+    if (!meld || meld.tiles.length < 2 || !this.canMoveMeld(meld.id)) return false;
+    d.group = [...meld.tiles];
+    d.groupMeld = meld.id;
+    d.started = true;
+    this.select(null);
+    sfx.pick();
+    vibrate([15, 30, 25]);
+    this.updateDrag(d.lastX, d.lastY);
+    return true;
+  }
+
   private updateDrag(x: number, y: number) {
     const d = this.drag!;
     const region = this.regionAt(y);
     const lift = d.touch ? 44 : 0; // la ficha se ve por encima del dedo
     d.region = region;
+    const group = d.group ?? [d.tileId];
+    const anchor = group.indexOf(d.tileId);
     if (region === 'rack') {
       // Mostrar en el atril
-      if (this.tiles.get(d.tileId).visible) this.tiles.set(d.tileId, { visible: false });
-      const st = this.rackTiles.get(d.tileId);
-      gsap.killTweensOf(st);
-      this.rackTiles.set(d.tileId, {
-        x, y: this.h - y + lift * 0.6, z: 50, rx: RACK_RX + 0.15, ry: 0, rz: -0.06, s: this.tileWpx * 1.12, visible: true, cell: cellOf(d.tileId),
+      const step = this.tileWpx * 1.12 + this.rackGap;
+      group.forEach((t, i) => {
+        if (this.tiles.get(t).visible) this.tiles.set(t, { visible: false });
+        gsap.killTweensOf(this.rackTiles.get(t));
+        this.rackTiles.set(t, {
+          x: x + (i - anchor) * step, y: this.h - y + lift * 0.6, z: 50, rx: RACK_RX + 0.15, ry: 0, rz: -0.06, s: this.tileWpx * 1.12, visible: true, cell: cellOf(t),
+        });
       });
       const idx = this.rackIndexAt(x, this.h - y);
       d.target = null;
@@ -860,16 +933,19 @@ export class BoardScene implements EngineScene {
         d.lastSent = 0;
       }
     } else {
-      if (this.rackTiles.get(d.tileId).visible) this.rackTiles.set(d.tileId, { visible: false });
       if (d.rackIndex !== -1) {
         d.rackIndex = -1;
         this.layoutRackPreview();
       }
       const wp = this.screenToTable(x, y - lift, LIFT) ?? { x: 0, z: 0 };
-      const st = this.tiles.get(d.tileId);
-      gsap.killTweensOf(st);
-      this.tiles.set(d.tileId, { x: wp.x, y: LIFT, z: wp.z, rx: -0.12, ry: 0, rz: -0.05, s: 1.06, visible: true, cell: cellOf(d.tileId), shadow: LIFT });
-      const target = findDropTarget(this.layout, wp.x, wp.z, d.tileId);
+      group.forEach((t, i) => {
+        if (this.rackTiles.get(t).visible) this.rackTiles.set(t, { visible: false });
+        gsap.killTweensOf(this.tiles.get(t));
+        this.tiles.set(t, { x: wp.x + (i - anchor) * STEP, y: LIFT, z: wp.z, rx: -0.12, ry: 0, rz: -0.05, s: 1.06, visible: true, cell: cellOf(t), shadow: LIFT });
+      });
+      // Para un grupo, el destino se calcula con su ficha central
+      const cx = wp.x + ((group.length - 1) / 2 - anchor) * STEP;
+      const target = findDropTarget(this.layout, d.group ? cx : wp.x, wp.z, d.group ?? d.tileId);
       const changed = JSON.stringify(target) !== JSON.stringify(d.target);
       d.target = target;
       if (changed) this.showDropPreview(target);
@@ -896,18 +972,23 @@ export class BoardScene implements EngineScene {
     this.sync(this.view, this.rackOrder, true);
     if (target.kind === 'new') {
       this.meldHalo.visible = false;
+      const g = this.drag?.group?.length ?? 1;
+      this.placeholder.scale.set(g, 1, 1);
       this.placeholder.visible = true;
-      this.placeholder.position.set(this.layout.next.x, 0.01, this.layout.next.z);
+      // El grupo ocupa g fichas a partir de la posición libre
+      this.placeholder.position.set(this.layout.next.x + ((g - 1) / 2) * STEP, 0.01, this.layout.next.z);
     } else {
       const box = this.layout.melds.find((b) => b.id === target.meldId);
       if (!box) return;
-      const others = box.tiles.filter((t) => t !== this.drag?.tileId);
+      const others = box.tiles.filter((t) => !this.isDragged(t));
       const idx = target.index ?? 0;
+      const g = this.drag?.group?.length ?? 1;
       const x = box.x0 + idx * STEP - STEP / 2;
       this.placeholder.visible = true;
       this.placeholder.position.set(x, 0.01, box.z);
+      this.placeholder.scale.set(g, 1, 1);
       this.meldHalo.visible = true;
-      const width = others.length * STEP + STEP + 0.3;
+      const width = others.length * STEP + STEP * g + 0.3;
       this.meldHalo.scale.set(width, 1, TILE_D + 0.4);
       this.meldHalo.position.set(box.x0 - TILE_W / 2 - STEP / 2 - 0.15 + width / 2, 0.006, box.z);
     }
@@ -931,6 +1012,7 @@ export class BoardScene implements EngineScene {
     }
     const d = this.drag;
     if (!d || d.pointerId !== e.pointerId) return;
+    this.clearHold();
     this.drag = null;
     if (!d.started) {
       this.onTap(p.x, p.y, d.tileId);
@@ -940,6 +1022,7 @@ export class BoardScene implements EngineScene {
   };
 
   private onCancel = (e: PointerEvent) => {
+    this.clearHold();
     this.pointers.delete(e.pointerId);
     this.gesture = null;
     this.cancelDrag();
@@ -950,18 +1033,54 @@ export class BoardScene implements EngineScene {
     this.drag = null;
     this.placeholder.visible = false;
     this.meldHalo.visible = false;
+    this.clearHold();
     if (d?.started) {
       this.cb.drag({ tileId: null, x: 0, z: 0, active: false });
-      this.restoreTile(d.tileId);
+      this.restoreTile(d.group ?? d.tileId);
     }
   }
 
   /** Devuelve una ficha a su sitio según la vista actual. */
-  private restoreTile(t: TileId) {
-    const where = this.loc.get(t);
-    // Si se ve en el conjunto equivocado, el sync la trasladará
-    if (where === 'rack' && this.tiles.get(t).visible) this.loc.set(t, 'table');
-    if (where === 'table' && this.rackTiles.get(t).visible) this.loc.set(t, 'rack');
+  /** Soltar una combinación entera: unir, mover a espacio libre o devolver al atril. */
+  private finishGroupDrag(d: DragState, group: TileId[], meldId: string) {
+    this.placeholder.scale.set(1, 1, 1);
+    const v = this.view;
+    if (!v || v.status !== 'playing' || v.turn !== v.you) {
+      this.cb.notMyTurn();
+      this.restoreTile(group);
+      return;
+    }
+    let to: MoveTarget;
+    if (d.region === 'rack') {
+      sfx.rack();
+      to = { kind: 'rack' };
+      for (const t of group) {
+        this.loc.set(t, 'rack');
+        this.tiles.set(t, { visible: false });
+      }
+    } else {
+      sfx.drop();
+      const target = d.target ?? { kind: 'new' };
+      to = target.kind === 'meld' ? { kind: 'meld', meldId: target.meldId!, index: target.index ?? 0 } : { kind: 'new' };
+      for (const t of group) {
+        this.loc.set(t, 'table');
+        this.rackTiles.set(t, { visible: false });
+      }
+    }
+    if (!this.cb.moveMeld(meldId, to)) {
+      sfx.invalid();
+      vibrate([20, 40, 20]);
+    }
+    this.restoreTile(group);
+  }
+
+  private restoreTile(t: TileId | TileId[]) {
+    for (const x of Array.isArray(t) ? t : [t]) {
+      const where = this.loc.get(x);
+      // Si se ve en el conjunto equivocado, el sync la trasladará
+      if (where === 'rack' && this.tiles.get(x).visible) this.loc.set(x, 'table');
+      if (where === 'table' && this.rackTiles.get(x).visible) this.loc.set(x, 'rack');
+    }
     if (this.view) this.sync(this.view, this.rackOrder, true);
   }
 
@@ -970,6 +1089,10 @@ export class BoardScene implements EngineScene {
     this.meldHalo.visible = false;
     this.cb.drag({ tileId: null, x: 0, z: 0, active: false });
     vibrate(12);
+    if (d.group && d.groupMeld) {
+      this.finishGroupDrag(d, d.group, d.groupMeld);
+      return;
+    }
     if (d.region === 'rack') {
       sfx.rack();
       const idx = d.rackIndex >= 0 ? d.rackIndex : this.rackOrder.length;
@@ -1136,6 +1259,52 @@ export class BoardScene implements EngineScene {
     this.confetti.burst(new THREE.Vector3(this.cam.tx, 1, this.cam.tz), count);
   }
 
+  /**
+   * Cámara cinemática de fin de partida: gira alrededor de la mesa acercándose un poco,
+   * con la jugada ganadora brillando en dorado. Se resuelve al terminar o al saltarla.
+   */
+  playCinematic(tiles: TileId[], opts: { confetti: boolean }): Promise<void> {
+    this.skipCinematic();
+    this.setInteractive(false);
+    const low = this.quality === 'low';
+    const seconds = low ? 1.6 : 3.2;
+    if (opts.confetti) this.celebrate();
+    return new Promise((resolve) => {
+      const start = { ...this.cam };
+      const tl = gsap.timeline({ onUpdate: () => this.applyCamera(), onComplete: () => this.skipCinematic() });
+      tl.to(this.cam, { yaw: low ? 0.6 : 1.25, dist: start.dist * 0.82, duration: seconds, ease: 'sine.inOut' });
+      // Brillo pulsante de las fichas de la jugada ganadora
+      for (const t of tiles) {
+        if (this.loc.get(t) !== 'table') continue;
+        const st = this.tiles.get(t);
+        tl.to(st, { r: 1.75, g: 1.45, b: 0.7, y: TILE_H / 2 + 0.25, duration: 0.45, yoyo: true, repeat: Math.max(1, Math.round(seconds / 0.45) - 1), ease: 'sine.inOut', onUpdate: () => this.tiles.markDirty(t) }, 0);
+      }
+      this.cinema = { tl, tiles, done: resolve };
+    });
+  }
+
+  /** Termina la cinemática (al tocar la pantalla) y devuelve la cámara a su sitio. */
+  skipCinematic() {
+    const c = this.cinema;
+    if (!c) return;
+    this.cinema = null;
+    c.tl.kill();
+    for (const t of c.tiles) {
+      const st = this.tiles.get(t);
+      if (this.loc.get(t) === 'table') this.tweenTile(this.tiles, t, { y: TILE_H / 2 }, 0.3);
+      void st;
+    }
+    this.refreshTints();
+    this.setInteractive(true);
+    this.userCamera = false;
+    this.fitCamera(true);
+    c.done();
+  }
+
+  get inCinematic(): boolean {
+    return this.cinema !== null;
+  }
+
   setQuality(q: Quality) {
     this.quality = q;
     const shadows = q !== 'low';
@@ -1147,7 +1316,7 @@ export class BoardScene implements EngineScene {
   }
 
   continuous(): boolean {
-    return this.confetti.active;
+    return this.confetti.active || this.cinema !== null;
   }
 
   update(dt: number) {
@@ -1172,6 +1341,14 @@ export class BoardScene implements EngineScene {
     r.setViewport(0, 0, w, h);
   }
 
+  /** Posición en pantalla (px) de una ficha de la mesa (depuración / tests e2e). */
+  screenPosOfTile(t: TileId): { x: number; y: number } | null {
+    if (this.loc.get(t) !== 'table') return null;
+    const st = this.tiles.get(t);
+    this.tmpV.set(st.x, st.y, st.z).project(this.camera);
+    return { x: ((this.tmpV.x + 1) / 2) * this.w, y: ((1 - this.tmpV.y) / 2) * this.mainH };
+  }
+
   /** Posición en pantalla de la mesa (para HUD/tutorial). */
   screenOfTableCenter(): { x: number; y: number } {
     this.tmpV.set(this.cam.tx, 0, this.cam.tz).project(this.camera);
@@ -1181,11 +1358,14 @@ export class BoardScene implements EngineScene {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.clearHold();
     this.unbindInput();
     for (const s of [this.tiles, this.backs, this.ghost, this.rackTiles]) {
       s.states.forEach((st) => gsap.killTweensOf(st));
       s.dispose();
     }
+    this.cinema?.tl.kill();
+    this.cinema = null;
     gsap.killTweensOf(this.cam);
     this.ghostMats.forEach((m) => m.dispose());
     this.confetti.dispose();

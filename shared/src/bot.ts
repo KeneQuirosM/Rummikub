@@ -71,7 +71,29 @@ function generateCandidates(counts: number[], jokers: number): Candidate[] {
 }
 
 /** Mejor combinación de jugadas con fichas del atril. */
-export function bestRackMelds(rack: readonly TileId[], minValue = 0, nodeLimit = 40000): TileId[][] {
+export type BotLevel = 'easy' | 'normal' | 'hard';
+export const BOT_LEVELS: readonly BotLevel[] = ['easy', 'normal', 'hard'];
+
+export interface BotOptions {
+  level?: BotLevel;
+  /** Fuente de azar (para tests reproducibles). */
+  rand?: () => number;
+}
+
+/** Pesos del puntaje de una combinación de jugadas. */
+interface MeldWeights {
+  /** Penalización por comodín usado (alta = los guarda). */
+  joker: number;
+  /** Peso del valor de las fichas (alto = prefiere soltar fichas altas). */
+  value: number;
+}
+
+export function bestRackMelds(
+  rack: readonly TileId[],
+  minValue = 0,
+  nodeLimit = 40000,
+  weights: MeldWeights = { joker: 15, value: 1 },
+): TileId[][] {
   const counts = new Array<number>(52).fill(0);
   let jokers = 0;
   for (const t of rack) {
@@ -83,7 +105,7 @@ export function bestRackMelds(rack: readonly TileId[], minValue = 0, nodeLimit =
   let bestScore = -1;
   let nodes = 0;
   const chosen: Candidate[] = [];
-  const score = (tiles: number, js: number, value: number) => tiles * 100 - js * 15 + value;
+  const score = (tiles: number, js: number, value: number) => tiles * 100 - js * weights.joker + value * weights.value;
 
   const dfs = (from: number, jLeft: number, tiles: number, js: number, value: number) => {
     if (++nodes > nodeLimit) return;
@@ -164,19 +186,34 @@ function newMeldOps(tiles: TileId[]): BotMove[] {
   return ops;
 }
 
-/** Calcula el turno del bot. */
-export function planBotTurn(ctx: TurnContext, current?: TurnSnapshot): BotPlan {
+/**
+ * Calcula el turno del bot.
+ *  - easy:   solo combinaciones de su atril (máx. 2 por turno), a veces "no ve" la jugada y roba,
+ *            nunca reorganiza la mesa.
+ *  - normal: atril + extender, liberar comodines y tomar prestadas fichas de la mesa.
+ *  - hard:   como normal con búsqueda mucho más profunda, guarda los comodines salvo para cerrar
+ *            y prioriza soltar fichas altas (menos puntos si se acaba el pozo).
+ */
+export function planBotTurn(ctx: TurnContext, current?: TurnSnapshot, opts: BotOptions = {}): BotPlan {
+  const level = opts.level ?? 'normal';
+  const rand = opts.rand ?? Math.random;
   const sim = new Simulator(ctx, current ?? ctx.start);
   const rack = () => sim.snap.rack;
+  const nodeLimit = level === 'easy' ? 1500 : level === 'hard' ? 150_000 : 40_000;
+  const weights: MeldWeights = level === 'hard' ? { joker: 70, value: 3 } : { joker: 15, value: 1 };
+
+  // Fácil: a veces se le pasa la jugada
+  if (level === 'easy' && rand() < (ctx.opened ? 0.12 : 0.2)) return { moves: [], play: false };
 
   if (!ctx.opened) {
-    const melds = bestRackMelds(rack(), MIN_OPEN_POINTS);
+    const melds = bestRackMelds(rack(), MIN_OPEN_POINTS, nodeLimit, weights);
     if (melds.length === 0) return { moves: [], play: false };
     for (const m of melds) sim.attempt(newMeldOps(m));
   } else {
-    for (const m of bestRackMelds(rack(), 0)) sim.attempt(newMeldOps(m));
+    for (const m of bestRackMelds(rack(), 0, nodeLimit, weights)) sim.attempt(newMeldOps(m));
 
-    let progress = true;
+    // Fácil: solo a veces se fija en la mesa, y únicamente para alargar combinaciones
+    let progress = level !== 'easy' || rand() < 0.6;
     let guard = 0;
     while (progress && guard++ < 30) {
       progress = false;
@@ -184,6 +221,8 @@ export function planBotTurn(ctx: TurnContext, current?: TurnSnapshot): BotPlan {
       const ordered = [...rack()].sort((a, b) => Number(isJoker(a)) - Number(isJoker(b)));
       for (const t of ordered) {
         if (!rack().includes(t)) continue;
+        // Difícil: los comodines del atril solo se gastan si con eso se queda sin fichas
+        if (level === 'hard' && isJoker(t) && rack().length > 1) continue;
         for (const m of [...sim.snap.table]) {
           const anchor = m.tiles[0]!;
           let done = false;
@@ -200,6 +239,7 @@ export function planBotTurn(ctx: TurnContext, current?: TurnSnapshot): BotPlan {
         }
       }
       if (progress) continue;
+      if (level === 'easy') break;
       // Liberar comodines: poner la ficha que representa y recolocar el comodín
       for (const m of [...sim.snap.table]) {
         const joker = m.tiles.find(isJoker);
@@ -263,10 +303,163 @@ export function planBotTurn(ctx: TurnContext, current?: TurnSnapshot): BotPlan {
     }
   }
 
-  if (sim.moves.length === 0) return { moves: [], play: false };
+  let best: BotPlan = { moves: [], play: false };
+  let bestPlaced = 0;
+  if (sim.moves.length > 0) {
+    const check = applyTurn(ctx, sim.snap);
+    if (check.ok && check.played.length > 0) {
+      best = { moves: sim.moves, play: true };
+      bestPlaced = check.played.length;
+    }
+  }
+  // Difícil: además intenta reorganizar toda la mesa y se queda con lo que coloque más fichas
+  if (level === 'hard' && ctx.opened && rack().length > 0) {
+    const solved = solveTableRearrangement(ctx, current ?? ctx.start);
+    if (solved && solved.placed > bestPlaced) best = { moves: solved.moves, play: true };
+  }
+  return best;
+}
+
+/**
+ * Reorganización completa (bot difícil): reparte TODAS las fichas de la mesa más el máximo de fichas
+ * del atril en combinaciones válidas. Búsqueda con poda que cubre primero las fichas de la mesa
+ * (obligatorias) y prefiere conservar las combinaciones existentes para no rehacer la mesa entera.
+ */
+export function solveTableRearrangement(
+  ctx: TurnContext,
+  start: TurnSnapshot,
+  limits: { nodes: number; ms: number } = { nodes: 60_000, ms: 220 },
+): { moves: BotMove[]; placed: number } | null {
+  if (!ctx.opened) return null;
+  const t0 = Date.now();
+  const tableIds = start.table.flatMap((m) => m.tiles);
+  const rackIds = start.rack;
+  const tableNeed = new Array<number>(52).fill(0);
+  const rackHave = new Array<number>(52).fill(0);
+  let tableJ = 0, rackJ = 0;
+  for (const t of tableIds) isJoker(t) ? tableJ++ : tableNeed[kindOf(t)]!++;
+  for (const t of rackIds) isJoker(t) ? rackJ++ : rackHave[kindOf(t)]!++;
+  const total = tableNeed.map((n, k) => n + rackHave[k]!);
+  const cands = generateCandidates(total, tableJ + rackJ);
+  // Firmas de las combinaciones actuales: se prueban primero (cambios mínimos)
+  const sig = (kinds: number[], j: number) => [...kinds].sort((a, b) => a - b).join(',') + '|' + j;
+  const existing = new Set(start.table.map((m) => sig(m.tiles.filter((t) => !isJoker(t)).map(kindOf), m.tiles.filter(isJoker).length)));
+  const byKind: number[][] = Array.from({ length: 52 }, () => []);
+  const jokerCands: number[] = [];
+  cands.forEach((c, i) => {
+    for (const k of c.kinds) byKind[k]!.push(i);
+    if (c.jokers > 0) jokerCands.push(i);
+  });
+  const rank = (i: number) => (existing.has(sig(cands[i]!.kinds, cands[i]!.jokers)) ? 0 : 1);
+  for (const list of [...byKind, jokerCands]) list.sort((a, b) => rank(a) - rank(b) || cands[b]!.kinds.length - cands[a]!.kinds.length);
+
+  let nodes = 0;
+  let best: { chosen: { c: Candidate; fromRack: number[]; jFromRack: number }[]; placed: number; changed: number } | null = null;
+  const chosen: { c: Candidate; fromRack: number[]; jFromRack: number }[] = [];
+  let tJ = tableJ, rJ = rackJ;
+
+  const leaf = () => {
+    // Fichas del atril que quedan: combinaciones solo de atril (búsqueda corta)
+    const rest: TileId[] = [];
+    for (let k = 0; k < 52; k++) for (let n = 0; n < rackHave[k]!; n++) rest.push(k);
+    for (let j = 0; j < rJ; j++) rest.push(104 + j);
+    const extra = rest.length >= 3 ? bestRackMelds(rest.map((k) => (k >= 104 ? k : tileOfKind(k))), 0, 2000) : [];
+    const placedCover = chosen.reduce((s2, x) => s2 + x.fromRack.length + x.jFromRack, 0);
+    const placed = placedCover + extra.reduce((s2, m) => s2 + m.length, 0);
+    const changed = chosen.filter((x) => !existing.has(sig(x.c.kinds, x.c.jokers))).length;
+    if (!best || placed > best.placed || (placed === best.placed && changed < best.changed)) {
+      best = { chosen: [...chosen], placed, changed };
+      bestExtra = extra;
+    }
+  };
+  let bestExtra: TileId[][] = [];
+
+  const dfs = () => {
+    if (++nodes > limits.nodes || (nodes % 512 === 0 && Date.now() - t0 > limits.ms)) return;
+    let k = tableNeed.findIndex((n) => n > 0);
+    const list = k >= 0 ? byKind[k]! : tJ > 0 ? jokerCands : null;
+    if (!list) return leaf();
+    for (const i of list) {
+      const c = cands[i]!;
+      if (c.jokers > tJ + rJ) continue;
+      // ¿Hay fichas para todos los tipos? (mesa primero, luego atril)
+      if (!c.kinds.every((kk) => tableNeed[kk]! > 0 || rackHave[kk]! > 0)) continue;
+      const fromRack: number[] = [];
+      for (const kk of c.kinds) {
+        if (tableNeed[kk]! > 0) tableNeed[kk]!--;
+        else {
+          rackHave[kk]!--;
+          fromRack.push(kk);
+        }
+      }
+      const jT = Math.min(tJ, c.jokers);
+      const jR = c.jokers - jT;
+      tJ -= jT;
+      rJ -= jR;
+      chosen.push({ c, fromRack, jFromRack: jR });
+      dfs();
+      chosen.pop();
+      tJ += jT;
+      rJ += jR;
+      for (const kk of c.kinds) {
+        if (fromRack.includes(kk)) rackHave[kk]!++;
+        else tableNeed[kk]!++;
+      }
+      if (nodes > limits.nodes) return;
+    }
+    void k;
+  };
+  dfs();
+  const found = best as { chosen: { c: Candidate; fromRack: number[]; jFromRack: number }[]; placed: number; changed: number } | null;
+  if (!found || found.placed === 0) return null;
+
+  // Asignar ids concretos: fichas de la mesa primero, luego del atril (mismo orden que la búsqueda)
+  const tablePool = [...tableIds];
+  const rackPool = [...rackIds];
+  const takeFrom = (pool: TileId[], pred: (t: TileId) => boolean) => {
+    const i = pool.findIndex(pred);
+    return i >= 0 ? pool.splice(i, 1)[0]! : null;
+  };
+  const target: TileId[][] = [];
+  for (const x of found.chosen) {
+    const tiles: TileId[] = [];
+    const rackKinds = [...x.fromRack];
+    for (const kk of x.c.kinds) {
+      const ri = rackKinds.indexOf(kk);
+      if (ri >= 0) {
+        rackKinds.splice(ri, 1);
+        tiles.push(takeFrom(rackPool, (t) => !isJoker(t) && kindOf(t) === kk)!);
+      } else tiles.push(takeFrom(tablePool, (t) => !isJoker(t) && kindOf(t) === kk)!);
+    }
+    for (let j = 0; j < x.c.jokers; j++) {
+      const fromTable = j < x.c.jokers - x.jFromRack;
+      tiles.push(takeFrom(fromTable ? tablePool : rackPool, isJoker)!);
+    }
+    if (tiles.some((t) => t === null)) return null;
+    target.push(tiles);
+  }
+  for (const m of bestExtra) {
+    const tiles = m.map((t) => takeFrom(rackPool, (r) => (isJoker(t) ? isJoker(r) : !isJoker(r) && kindOf(r) === kindOf(t))));
+    if (tiles.some((t) => t === null)) return null;
+    target.push(tiles as TileId[]);
+  }
+  // Movimientos: solo las combinaciones que cambian
+  const same = (a: TileId[], b: TileId[]) => a.length === b.length && a.every((t) => b.includes(t));
+  const sim = new Simulator(ctx, start);
+  const ops: BotMove[] = [];
+  for (const m of target) {
+    if (start.table.some((old) => same(old.tiles, m))) continue;
+    ops.push(...newMeldOps(m));
+  }
+  if (ops.length === 0 || !sim.attempt(ops)) return null;
   const check = applyTurn(ctx, sim.snap);
-  if (!check.ok || check.played.length === 0) return { moves: [], play: false };
-  return { moves: sim.moves, play: true };
+  if (!check.ok || check.played.length === 0) return null;
+  return { moves: sim.moves, placed: check.played.length };
+}
+
+/** Una ficha cualquiera de un tipo (para búsquedas que trabajan por tipo). */
+function tileOfKind(k: number): TileId {
+  return k;
 }
 
 /** Traduce un movimiento del bot a una intención real según la mesa actual. */

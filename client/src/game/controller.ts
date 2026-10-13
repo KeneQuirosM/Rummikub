@@ -1,5 +1,6 @@
 import {
   analyzeMeld,
+  applyMeldMove,
   applyMove,
   compareByColor,
   compareByNumber,
@@ -41,6 +42,22 @@ export function predictMove(v: PlayerView, tileId: TileId, to: MoveTarget): Play
     table: r.snapshot.table,
     playedThisTurn: startRack.filter((t) => !rackSet.has(t)),
     nextMeldSeq: seq,
+    canUndo: true,
+    players: v.players.map((p, i) => (i === v.you ? { ...p, rackCount: r.snapshot.rack.length } : p)) as PlayerView['players'],
+  };
+}
+
+/** Predicción local de mover una combinación entera. */
+export function predictMeldMove(v: PlayerView, meldId: string, to: MoveTarget): PlayerView | null {
+  const r = applyMeldMove(turnCtx(v), { rack: v.rack, table: v.table }, meldId, to);
+  if (!r.ok) return null;
+  const startRack = [...v.rack, ...v.playedThisTurn];
+  const rackSet = new Set(r.snapshot.rack);
+  return {
+    ...v,
+    rack: r.snapshot.rack,
+    table: r.snapshot.table,
+    playedThisTurn: startRack.filter((t) => !rackSet.has(t)),
     canUndo: true,
     players: v.players.map((p, i) => (i === v.you ? { ...p, rackCount: r.snapshot.rack.length } : p)) as PlayerView['players'],
   };
@@ -158,6 +175,27 @@ export class GameController {
     this.syncRackOrder(next.rack, rackIndex !== undefined ? { tile: tileId, index: rackIndex } : undefined);
     this.em.emit('change', next, prev);
     void this.send({ type: 'move', tileId, to });
+    return true;
+  }
+
+  /** Mueve una combinación entera (predicción inmediata + intención al servidor). */
+  moveMeld(meldId: string, to: MoveTarget): boolean {
+    const v = this.view;
+    if (!v) return false;
+    if (!this.isMyTurn) {
+      this.em.emit('error', 'NOT_YOUR_TURN');
+      return false;
+    }
+    const next = predictMeldMove(v, meldId, to);
+    if (!next) {
+      void this.send({ type: 'moveMeld', meldId, to });
+      return false;
+    }
+    const prev = this.view;
+    this.view = next;
+    this.syncRackOrder(next.rack);
+    this.em.emit('change', next, prev);
+    void this.send({ type: 'moveMeld', meldId, to });
     return true;
   }
 

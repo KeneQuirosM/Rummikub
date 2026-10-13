@@ -97,10 +97,11 @@ export interface DropTarget {
 /**
  * ¿Dónde caería una ficha soltada en (x, z)? Si está cerca de una combinación se inserta según la x.
  */
-export function findDropTarget(layout: TableLayout, x: number, z: number, dragged: TileId | null): DropTarget {
+export function findDropTarget(layout: TableLayout, x: number, z: number, dragged: TileId | readonly TileId[] | null): DropTarget {
+  const isDragged = (t: TileId) => (Array.isArray(dragged) ? dragged.includes(t) : t === dragged);
   let best: { box: MeldBox; d: number } | null = null;
   for (const box of layout.melds) {
-    const tiles = box.tiles.filter((t) => t !== dragged);
+    const tiles = box.tiles.filter((t) => !isDragged(t));
     if (tiles.length === 0) continue;
     const left = box.x0 - TILE_W / 2 - 0.55;
     const right = box.x0 + box.width - TILE_W / 2 + 0.55;
@@ -110,7 +111,7 @@ export function findDropTarget(layout: TableLayout, x: number, z: number, dragge
     if (!best || d < best.d) best = { box, d };
   }
   if (!best) return { kind: 'new' };
-  const tiles = best.box.tiles.filter((t) => t !== dragged);
+  const tiles = best.box.tiles.filter((t) => !isDragged(t));
   let index = 0;
   for (const t of tiles) {
     const p = layout.pos.get(t);

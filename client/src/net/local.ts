@@ -7,6 +7,7 @@ import {
   turnContext,
   viewFor,
   type Ack,
+  type BotLevel,
   type DragPayload,
   type GameState,
   type Intent,
@@ -43,6 +44,7 @@ export class LocalTransport implements Transport {
     private profile: { name: string; avatar: string },
     private turnSeconds: number,
     botCount = 1,
+    readonly level: BotLevel = 'normal',
     seed?: number,
   ) {
     const n = Math.max(1, Math.min(3, botCount));
@@ -98,7 +100,7 @@ export class LocalTransport implements Transport {
     this.botBusy = true;
     const g = this.game;
     const seat = g.turn;
-    const plan = planBotTurn(turnContext(g));
+    const plan = planBotTurn(turnContext(g), undefined, { level: this.level });
     const steps = [...plan.moves];
     const step = () => {
       if (this.disposed || g !== this.game || g.status !== 'playing' || g.turn !== seat) {
@@ -132,7 +134,8 @@ export class LocalTransport implements Transport {
 
   emote(e: string): void {
     this.em.emit('emote', { from: 0, emoji: e });
-    const replies = ['😎', '🤔', '👍', '😂'];
+    // Los bots contestan con un emoji o una frase rápida
+    const replies = ['😎', '🤔', '👍', '😂', 'phrase:beat', 'phrase:luck', 'phrase:lol', 'phrase:gg'];
     const who = 1 + Math.floor(Math.random() * this.bots.length);
     this.later(() => this.em.emit('emote', { from: who, emoji: replies[Math.floor(Math.random() * replies.length)]! }), 1200);
   }

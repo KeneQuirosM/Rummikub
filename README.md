@@ -7,7 +7,15 @@ Creas una sala, compartes el link por WhatsApp y tus amigos entran con un toque;
 
 - Mesa de fieltro con borde de madera, fichas biseladas con numeral grabado, sombras de contacto, animaciones GSAP y sonido sintetizado.
 - Motor de reglas **100 % en el servidor**, compartido con el cliente para predicción instantánea.
-- Modo práctica contra **1 a 3 bots** (backtracking + manipulación de mesa) que funciona sin conexión.
+- Modo práctica contra **1 a 3 bots** en tres niveles (Fácil / Normal / Difícil) que funciona sin conexión.
+  Difícil reorganiza toda la mesa con un solucionador (cubre todas las fichas de la mesa + el máximo del atril).
+  Torneos deterministas en los tests: Normal le gana ~80 % a Fácil y Difícil ~85 % a Normal.
+- **Mover combinaciones enteras**: mantener presionada una ficha de la mesa (o Shift + arrastrar) levanta su combinación;
+  se suelta sobre otra para unirlas, en un espacio libre o en el atril (intención `moveMeld`, un solo paso de deshacer).
+- **Estadísticas e historial** guardados en el teléfono: partidas, victorias, rachas, mejor jugada, victoria más rápida
+  y las últimas 20 partidas (por modo: amigos / bots).
+- **Reacciones**: 16 emojis y 8 frases rápidas que cada jugador ve traducidas a su idioma (`phrase:<id>`).
+- **Cámara cinemática al terminar**: giro alrededor de la mesa con la jugada ganadora brillando (se salta con un toque).
 - Si alguien abandona a mitad de partida, **un bot toma su lugar** y la mesa sigue.
 - Móvil primero: portrait y landscape, arrastrar y soltar o *tocar y tocar*, safe areas, Wake Lock y pantalla completa.
 

@@ -10,6 +10,8 @@ export type MoveTarget =
 /** Intenciones que el cliente envía al servidor durante su turno. */
 export type Intent =
   | { type: 'move'; tileId: TileId; to: MoveTarget }
+  /** Mover una combinación entera: a otra (unirlas), a un espacio libre o de vuelta al atril. */
+  | { type: 'moveMeld'; meldId: string; to: MoveTarget }
   | { type: 'undo' }
   | { type: 'reset' }
   | { type: 'draw' }
@@ -143,7 +145,18 @@ export interface ChatMessage {
   at: number;
 }
 
-export const EMOTES = ['👍', '😂', '😮', '😡', '🔥', '👏', '🤔', '😎'] as const;
+export const EMOTES = ['👍', '😂', '😮', '😡', '🔥', '👏', '🤔', '😎', '😭', '🥳', '😱', '🙏', '💪', '🤯', '😴', '❤️'] as const;
+
+/** Frases rápidas: viajan como `phrase:<id>` y cada cliente las muestra traducidas a su idioma. */
+export const PHRASES = ['gg', 'hurry', 'close', 'beat', 'luck', 'lol', 'rematch', 'phew'] as const;
+export type PhraseId = (typeof PHRASES)[number];
+
+/** ¿Es una reacción válida (emoji de la lista o frase rápida)? */
+export function isReaction(raw: unknown): raw is string {
+  if (typeof raw !== 'string') return false;
+  if ((EMOTES as readonly string[]).includes(raw)) return true;
+  return raw.startsWith('phrase:') && (PHRASES as readonly string[]).includes(raw.slice(7));
+}
 
 export interface ClientToServerEvents {
   'room:create': (p: CreateRoomPayload, ack: (r: Ack<RoomJoined>) => void) => void;

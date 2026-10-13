@@ -11,7 +11,7 @@ import {
   createGame,
   currentTable,
   DEFAULT_TURN_SECONDS,
-  EMOTES,
+  isReaction,
   forceDraw,
   forceFinish,
   MAX_CHAT_LENGTH,
@@ -98,7 +98,7 @@ export function sanitizeChat(raw: unknown): string | null {
 }
 
 export function isEmote(raw: unknown): raw is string {
-  return typeof raw === 'string' && (EMOTES as readonly string[]).includes(raw);
+  return isReaction(raw);
 }
 
 export class RoomManager {

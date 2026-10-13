@@ -133,6 +133,20 @@ export const sfx = {
     const t = c.currentTime;
     [392, 349, 311].forEach((f, i) => tone(c, t + i * 0.18, f, 0.5, 0.12, 'triangle'));
   },
+  /** Aplauso corto: ráfagas de ruido con ritmo irregular. */
+  applause() {
+    const c = ac();
+    if (!c) return;
+    const t = c.currentTime;
+    for (let i = 0; i < 26; i++) noise(c, t + i * 0.035 + Math.random() * 0.03, 0.05, 1500 + Math.random() * 1500, 1.5, 0.25 + Math.random() * 0.2);
+  },
+  /** Risita: tres "ja" descendentes. */
+  laugh() {
+    const c = ac();
+    if (!c) return;
+    const t = c.currentTime;
+    [520, 470, 420].forEach((f, i) => tone(c, t + i * 0.14, f, 0.11, 0.12, 'triangle', f * 0.85));
+  },
   pop() {
     const c = ac();
     if (!c) return;

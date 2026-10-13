@@ -13,6 +13,7 @@ export interface Settings {
   fullscreen: boolean;
   tutorialDone: boolean;
   sortMode: 'color' | 'number';
+  botLevel: 'easy' | 'normal' | 'hard';
 }
 
 export interface Profile {
@@ -54,6 +55,7 @@ const defaults: Settings = {
   fullscreen: true,
   tutorialDone: false,
   sortMode: 'color',
+  botLevel: 'normal',
 };
 
 export const settings: Settings = load(SETTINGS_KEY, defaults);

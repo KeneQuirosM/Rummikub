@@ -5,10 +5,12 @@ import type {
   GameResult,
   GameStatus,
   Intent,
+  MoveTarget,
   PlayerView,
   PublicPlayer,
 } from './protocol.js';
 import {
+  applyMeldMove,
   applyMove,
   applyTurn,
   cloneSnapshot,
@@ -142,6 +144,24 @@ export function nextSeat(state: GameState, seat: Seat): Seat {
 
 export type IntentResult = { ok: true } | { ok: false; error: GameErrorCode };
 
+function sanitizeTarget(raw: unknown): MoveTarget | null {
+  const to = raw as Record<string, unknown> | undefined;
+  if (!to || typeof to !== 'object') return null;
+  if (to.kind === 'rack' || to.kind === 'new') return { kind: to.kind };
+  if (
+    to.kind === 'meld' &&
+    typeof to.meldId === 'string' &&
+    to.meldId.length <= 16 &&
+    typeof to.index === 'number' &&
+    Number.isInteger(to.index) &&
+    to.index >= 0 &&
+    to.index <= 20
+  ) {
+    return { kind: 'meld', meldId: to.meldId, index: to.index };
+  }
+  return null;
+}
+
 /** Valida que una intención recibida por red tenga la forma correcta. */
 export function sanitizeIntent(raw: unknown): Intent | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -152,6 +172,11 @@ export function sanitizeIntent(raw: unknown): Intent | null {
     case 'draw':
     case 'endTurn':
       return { type: i.type };
+    case 'moveMeld': {
+      if (typeof i.meldId !== 'string' || !i.meldId || i.meldId.length > 16) return null;
+      const target = sanitizeTarget(i.to);
+      return target ? { type: 'moveMeld', meldId: i.meldId, to: target } : null;
+    }
     case 'move': {
       if (!isValidTileId(i.tileId)) return null;
       const to = i.to as Record<string, unknown> | undefined;
@@ -186,6 +211,14 @@ export function applyIntent(state: GameState, seat: Seat, intent: Intent, now = 
     case 'move': {
       const r = applyMove(turnContext(state), state.working, intent.tileId, intent.to, meldIdGen(state));
       if (!r.ok) return r;
+      state.history.push(state.working);
+      state.working = r.snapshot;
+      break;
+    }
+    case 'moveMeld': {
+      const r = applyMeldMove(turnContext(state), state.working, intent.meldId, intent.to);
+      if (!r.ok) return r;
+      // Un solo paso de deshacer para toda la combinación
       state.history.push(state.working);
       state.working = r.snapshot;
       break;

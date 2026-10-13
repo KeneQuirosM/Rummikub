@@ -1,4 +1,4 @@
-import { EMOTES, type ChatMessage, type GameErrorCode, type GameEvent, type PlayerView, type RoomErrorCode } from '@rummi/shared';
+import { EMOTES, PHRASES, type ChatMessage, type GameErrorCode, type GameEvent, type PlayerView, type RoomErrorCode } from '@rummi/shared';
 import { sfx, vibrate } from '../audio';
 import type { GameController } from '../game/controller';
 import { onLangChange, t } from '../i18n';
@@ -32,6 +32,11 @@ export class GameHud {
   private chatOpen = false;
   private replacedSeen = new Set<number>();
   private relayoutTimers: ReturnType<typeof setTimeout>[] = [];
+  /** Última jugada (para destacar la jugada ganadora en la cinemática). */
+  private lastPlay: { player: number; tiles: number[] } | null = null;
+  /** La cinemática de fin está en curso: el ranking se muestra al terminar. */
+  private cinematicRunning = false;
+  private endShownFor = false;
   private layoutQueued = false;
 
   constructor(private ctl: GameController, private board: BoardScene, private opts: HudOptions) {
@@ -80,11 +85,16 @@ export class GameHud {
     on('rack-left', () => this.scrollRack(-1));
     on('rack-right', () => this.scrollRack(1));
     const picker = $('emote-picker');
-    picker.innerHTML = EMOTES.map((e) => `<button type="button" data-e="${e}">${e}</button>`).join('');
+    this.renderPicker('emojis');
     const pick = (e: Event) => {
-      const b = (e.target as HTMLElement).closest('button');
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button');
       if (!b) return;
-      tr.emote(b.dataset.e!);
+      if (b.dataset.tab) {
+        this.renderPicker(b.dataset.tab as 'emojis' | 'phrases');
+        return;
+      }
+      if (!b.dataset.e) return;
+      tr.emote(b.dataset.e);
       picker.hidden = true;
     };
     picker.addEventListener('click', pick);
@@ -252,7 +262,33 @@ export class GameHud {
     return { left: `${Math.max(4, r.left + 4)}px`, top: `${r.bottom + 6}px` };
   }
 
-  private floatEmoji(emoji: string, from: number) {
+  /** Selector de reacciones con dos pestañas: emojis y frases rápidas. */
+  private renderPicker(tab: 'emojis' | 'phrases') {
+    const picker = $('emote-picker');
+    const tabs = `<div class="picker-tabs">
+      <button type="button" data-tab="emojis" class="${tab === 'emojis' ? 'on' : ''}">😀 ${t('react.emojis')}</button>
+      <button type="button" data-tab="phrases" class="${tab === 'phrases' ? 'on' : ''}">💬 ${t('react.phrases')}</button>
+    </div>`;
+    const body =
+      tab === 'emojis'
+        ? `<div class="picker-grid">${EMOTES.map((e) => `<button type="button" data-e="${e}">${e}</button>`).join('')}</div>`
+        : `<div class="picker-phrases">${PHRASES.map((id) => `<button type="button" data-e="phrase:${id}">${escapeHtml(t(`phrase.${id}`))}</button>`).join('')}</div>`;
+    picker.innerHTML = tabs + body;
+  }
+
+  private floatEmoji(raw: string, from: number) {
+    // Frase rápida: globo con el texto traducido al idioma de quien lo recibe
+    if (raw.startsWith('phrase:')) {
+      const id = raw.slice(7);
+      const who = this.ctl.view?.players[from];
+      if (id === 'gg' || id === 'rematch') sfx.applause();
+      else if (id === 'lol') sfx.laugh();
+      else sfx.pop();
+      vibrate(10);
+      this.floatBubble(`${who?.avatar ?? ''} ${t(`phrase.${id}`)}`, from, from === this.ctl.view?.you);
+      return;
+    }
+    const emoji = raw;
     const mine = from === this.ctl.view?.you;
     const el = document.createElement('div');
     el.className = 'floater';
@@ -261,16 +297,21 @@ export class GameHud {
     el.style.left = pos?.left ?? `${mine ? 60 + Math.random() * 25 : 15 + Math.random() * 25}%`;
     el.style.top = pos?.top ?? (mine ? `calc(100% - var(--rack-h) - var(--actions-h) - 90px)` : `calc(var(--hud-h) + 40px)`);
     $('floaters').appendChild(el);
-    sfx.pop();
+    if (emoji === '👏') sfx.applause();
+    else if (emoji === '😂') sfx.laugh();
+    else sfx.pop();
     vibrate(10);
     setTimeout(() => el.remove(), 2300);
   }
 
-  private floatBubble(text: string, from: number) {
+  private floatBubble(text: string, from: number, mine = false) {
     const el = document.createElement('div');
     el.className = 'floater bubble';
     el.textContent = text;
-    const pos = this.chipPos(from);
+    const pos = mine
+      ? { left: 'auto', top: `calc(100% - var(--rack-h) - var(--actions-h) - 110px)` }
+      : this.chipPos(from);
+    if (mine) el.style.right = 'calc(70px + var(--sar))';
     el.style.left = pos?.left ?? '12px';
     el.style.top = pos?.top ?? `calc(var(--hud-h) + 50px)`;
     $('floaters').appendChild(el);
@@ -294,6 +335,7 @@ export class GameHud {
         else if (e.player !== v.you && v.players.length === 2) toast(t('game.drew', { name: oppName }));
         break;
       case 'play':
+        this.lastPlay = { player: e.player, tiles: e.tiles };
         if (e.player !== v.you) toast(t(e.tiles.length === 1 ? 'game.played1' : 'game.played', { name: oppName, n: e.tiles.length }));
         else sfx.valid();
         break;
@@ -302,6 +344,8 @@ export class GameHud {
       case 'start':
         closeAllModals();
         this.endModal = null;
+        this.endShownFor = false;
+        this.lastPlay = null;
         break;
     }
   }
@@ -351,10 +395,10 @@ export class GameHud {
     const end = $('act-end') as HTMLButtonElement;
     end.disabled = !mine || !played;
     end.classList.toggle('ready', mine && played && allValid && (me.opened || this.ctl.openingPoints() >= 30));
-    this.board.setInteractive(true);
     this.tickTimer();
     this.updateRackArrows();
 
+    if (v.status === 'playing') this.endShownFor = false;
     if (v.status === 'ended') this.showEnd(v);
     else if (this.endModal) {
       this.endModal.close();
@@ -411,6 +455,28 @@ export class GameHud {
   }
 
   private showEnd(v: PlayerView) {
+    if (this.cinematicRunning) return;
+    if (!this.endModal && !this.endShownFor) {
+      // Primero la cámara cinemática (saltable con un toque) y después el ranking
+      this.endShownFor = true;
+      this.cinematicRunning = true;
+      const r = v.result!;
+      const won = r.winners.includes(v.you);
+      const tiles = this.lastPlay && r.winners.includes(this.lastPlay.player) ? this.lastPlay.tiles : [];
+      if (won) {
+        sfx.win();
+        vibrate([30, 50, 30, 50, 80]);
+      } else sfx.lose();
+      const skip = () => this.board.skipCinematic();
+      window.addEventListener('pointerdown', skip, { once: true });
+      void this.board.playCinematic(tiles, { confetti: won }).then(() => {
+        window.removeEventListener('pointerdown', skip);
+        this.cinematicRunning = false;
+        const latest = this.ctl.view;
+        if (latest?.status === 'ended') this.showEnd(latest);
+      });
+      return;
+    }
     const r = v.result!;
     const won = r.winners.includes(v.you);
     const shared = r.winners.length > 1;
@@ -458,13 +524,7 @@ export class GameHud {
       b.disabled = true;
       b.textContent = t('end.rematchWaiting');
     });
-    if (first) {
-      if (won) {
-        sfx.win();
-        vibrate([30, 50, 30, 50, 80]);
-        this.board.celebrate();
-      } else sfx.lose();
-    }
+    void first;
   }
 
   dispose() {

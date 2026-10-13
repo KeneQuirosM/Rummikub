@@ -107,6 +107,45 @@ export function applyMove(
   return { ok: true, snapshot: snap };
 }
 
+/**
+ * Mueve una combinación entera (función pura).
+ *  - a otra combinación: se unen insertando todas sus fichas en `index` (y se ordena si hace falta);
+ *  - a 'new': la combinación pasa al final de la mesa (reacomodar);
+ *  - al atril: solo si TODAS sus fichas salieron de mi atril en este turno.
+ * Mismas reglas que applyMove: sin abrir no se toca nada que ya estuviera en la mesa.
+ */
+export function applyMeldMove(
+  ctx: TurnContext,
+  current: TurnSnapshot,
+  meldId: string,
+  to: MoveTarget,
+): RuleResult<{ snapshot: TurnSnapshot }> {
+  const src = current.table.find((m) => m.id === meldId);
+  if (!src) return { ok: false, error: 'MELD_NOT_FOUND' };
+  const startTable = new Set(tableTiles(ctx.start.table));
+  if (!ctx.opened && src.tiles.some((t) => startTable.has(t))) return { ok: false, error: 'NOT_OPENED' };
+  if (to.kind === 'rack' && !src.tiles.every((t) => ctx.start.rack.includes(t))) return { ok: false, error: 'CANT_TAKE_FROM_TABLE' };
+  if (to.kind === 'meld') {
+    if (to.meldId === meldId) return { ok: true, snapshot: cloneSnapshot(current) };
+    const target = current.table.find((m) => m.id === to.meldId);
+    if (!target) return { ok: false, error: 'MELD_NOT_FOUND' };
+    if (!ctx.opened && target.tiles.some((t) => startTable.has(t))) return { ok: false, error: 'NOT_OPENED' };
+    if (!Number.isInteger(to.index)) return { ok: false, error: 'BAD_INTENT' };
+  }
+  const snap = cloneSnapshot(current);
+  const i = snap.table.findIndex((m) => m.id === meldId);
+  const [moved] = snap.table.splice(i, 1);
+  if (to.kind === 'rack') snap.rack.push(...moved!.tiles);
+  else if (to.kind === 'new') snap.table.push(moved!);
+  else {
+    const target = snap.table.find((m) => m.id === to.meldId)!;
+    const idx = Math.max(0, Math.min(target.tiles.length, to.index));
+    target.tiles.splice(idx, 0, ...moved!.tiles);
+    target.tiles = arrangeMeld(target.tiles);
+  }
+  return { ok: true, snapshot: snap };
+}
+
 function multisetEqual(a: readonly TileId[], b: readonly TileId[]): boolean {
   if (a.length !== b.length) return false;
   const sa = [...a].sort((x, y) => x - y);

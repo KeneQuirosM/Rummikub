@@ -193,6 +193,11 @@ describe('salas', () => {
     a.emit('emote', '<script>');
     a.emit('emote', '👍');
     expect(await gotEmote).toMatchObject({ emoji: '👍' });
+    // Frases rápidas: solo las de la lista
+    const gotPhrase = new Promise<unknown>((res) => b.once('emote', res));
+    a.emit('emote', 'phrase:hackeo');
+    a.emit('emote', 'phrase:gg');
+    expect(await gotPhrase).toMatchObject({ emoji: 'phrase:gg' });
   });
 });
 

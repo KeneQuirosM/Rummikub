@@ -284,10 +284,19 @@ kbd { background: #222; border: 1px solid #444; border-radius: 4px; padding: 1px
 
 .emote-picker {
   position: absolute; bottom: calc(var(--rack-h) + var(--actions-h) + 66px); right: calc(62px + var(--sar));
-  display: grid; grid-template-columns: repeat(4, 48px); gap: 6px; padding: 8px; border-radius: 16px;
+  gap: 6px; padding: 8px; border-radius: 16px;
   background: var(--panel-solid); border: 1px solid var(--line); z-index: 5;
 }
-.emote-picker button { font-size: 28px; height: 48px; border: 0; background: rgba(255, 255, 255, 0.05); border-radius: 10px; cursor: pointer; }
+/* Selector de reacciones: pestañas + cuadrícula de emojis / lista de frases */
+.emote-picker { display: flex; flex-direction: column; width: min(260px, calc(100vw - 90px)); }
+.picker-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 6px; }
+.picker-tabs button { min-height: 38px; border: 0; border-radius: 10px; background: rgba(255, 255, 255, 0.05); color: var(--muted); font-weight: 700; font-size: 13px; cursor: pointer; }
+.picker-tabs button.on { background: var(--gold); color: #1a1408; }
+.picker-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.picker-grid button { font-size: 28px; height: 48px; border: 0; background: rgba(255, 255, 255, 0.05); border-radius: 10px; cursor: pointer; }
+.picker-phrases { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.picker-phrases button { min-height: 44px; border: 0; padding: 6px 8px; background: rgba(255, 255, 255, 0.06); color: var(--text); border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer; line-height: 1.2; }
+.picker-grid button:active, .picker-phrases button:active { transform: scale(0.94); }
 .chat {
   position: absolute; bottom: calc(var(--rack-h) + var(--actions-h) + 10px); right: calc(62px + var(--sar)); width: min(320px, calc(100% - 84px));
   border-radius: 16px; background: var(--panel-solid); border: 1px solid var(--line); z-index: 5; display: flex; flex-direction: column;
@@ -359,3 +368,29 @@ kbd { background: #222; border: 1px solid #444; border-radius: 4px; padding: 1px
 .bots-pick button b { font-size: 30px; color: var(--gold); line-height: 1; }
 .bots-pick button span { font-size: 13px; color: var(--muted); white-space: nowrap; }
 .bots-pick button:active { transform: scale(0.96); }
+
+.level-seg { display: grid; grid-template-columns: repeat(3, 1fr); width: 100%; }
+.level-seg button { min-height: 42px; }
+.level-hint { font-size: 13px; min-height: 36px; margin: 8px 0 4px; }
+
+/* ------------------------------------------------------------ menú: fila de 3 y estadísticas */
+.menu-row.three { grid-template-columns: repeat(3, 1fr); }
+.btn-col { flex-direction: column; gap: 2px; min-height: 64px; padding: 6px 4px; font-size: 13px; line-height: 1.15; text-align: center; }
+.btn-col .ico { font-size: 20px; }
+.stats-modal { width: min(460px, 100%); }
+.stats-tabs { display: grid; grid-template-columns: repeat(3, 1fr); width: 100%; margin-bottom: 12px; }
+.stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.stat { background: rgba(0, 0, 0, 0.3); border-radius: 12px; padding: 10px 6px; text-align: center; display: flex; flex-direction: column; gap: 2px; }
+.stat b { font-size: 24px; color: var(--gold); font-weight: 800; }
+.stat span { font-size: 12px; color: var(--muted); }
+.stat.wide { grid-column: span 3; flex-direction: row; justify-content: center; align-items: baseline; gap: 10px; }
+.stat.wide b { font-size: 18px; }
+.stats-sub { margin: 16px 0 8px; font-size: 15px; color: var(--muted); font-weight: 700; }
+.history { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; max-height: 40vh; overflow-y: auto; touch-action: pan-y; }
+.history li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 12px; background: rgba(0, 0, 0, 0.3); }
+.history li.win { background: rgba(242, 199, 92, 0.13); }
+.history .place { width: 30px; text-align: center; font-weight: 800; color: var(--muted); }
+.history .info { flex: 1; min-width: 0; font-size: 14px; line-height: 1.3; }
+.history .info small { color: var(--muted); font-size: 12px; }
+.history .pts { font-weight: 800; font-size: 18px; text-align: right; }
+.history .pts small { display: block; font-size: 10px; color: var(--muted); font-weight: 600; }
