@@ -1,5 +1,6 @@
 /* Service worker: app shell offline (cache-first para assets con hash, network-first para HTML). */
-const VERSION = 'rummi-v1';
+// Una caché por compilación: la versión llega en la URL de registro (sw.js?v=...)
+const VERSION = 'rummi-' + (new URL(self.location.href).searchParams.get('v') || 'dev');
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon.svg'];
 
 self.addEventListener('install', (e) => {
@@ -18,7 +19,7 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/socket.io')) return;
   if (req.mode === 'navigate') {
     e.respondWith(
-      fetch(req)
+      fetch(req, { cache: 'no-store' })
         .then((res) => {
           const copy = res.clone();
           caches.open(VERSION).then((c) => c.put('/index.html', copy));

@@ -499,9 +499,37 @@ function setupConnectivityBanner() {
 function registerServiceWorker() {
   if (!('serviceWorker' in navigator) || import.meta.env.DEV) return;
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    // La URL incluye la compilación: cada despliegue instala un service worker nuevo y borra la caché vieja
+    navigator.serviceWorker.register(`/sw.js?v=${__BUILD_ID__}`).catch(() => {});
   });
 }
+
+/**
+ * Tras un despliegue, una pestaña abierta con la versión anterior pide archivos que ya no existen (404).
+ * En ese caso se recarga UNA vez para tomar la versión nueva (sin bucles si el problema es otro).
+ */
+function setupStaleBuildRecovery() {
+  const KEY = 'rummi.reloadedFor';
+  const reloadOnce = () => {
+    try {
+      if (sessionStorage.getItem(KEY) === __BUILD_ID__) return;
+      sessionStorage.setItem(KEY, __BUILD_ID__);
+    } catch {
+      /* sin sessionStorage: recargar igual */
+    }
+    location.reload();
+  };
+  // Sin preventDefault: el import falla de verdad (no devuelve undefined) y la página se recarga
+  window.addEventListener('vite:preloadError', () => reloadOnce());
+  window.addEventListener('unhandledrejection', (e) => {
+    const msg = String((e.reason as Error | undefined)?.message ?? e.reason ?? '');
+    if (/dynamically imported module|Importing a module script failed|error loading dynamically imported module|Unable to preload/i.test(msg)) {
+      e.preventDefault();
+      reloadOnce();
+    }
+  });
+}
+setupStaleBuildRecovery();
 
 // Exponer estado para tests e2e (solo lectura)
 declare global {

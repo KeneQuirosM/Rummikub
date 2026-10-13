@@ -2,7 +2,13 @@ import { defineConfig } from 'vite';
 
 const serverPort = process.env.SERVER_PORT ?? '3001';
 
+// Identificador único de cada compilación (para el service worker y la recarga tras un despliegue)
+const buildId = process.env.BUILD_ID ?? Date.now().toString(36);
+
 export default defineConfig({
+  define: {
+    __BUILD_ID__: JSON.stringify(buildId),
+  },
   server: {
     port: 5173,
     host: true,
