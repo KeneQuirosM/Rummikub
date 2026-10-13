@@ -14,6 +14,8 @@ export interface Settings {
   tutorialDone: boolean;
   sortMode: 'color' | 'number';
   botLevel: 'easy' | 'normal' | 'hard';
+  tableTheme: string;
+  backTheme: string;
 }
 
 export interface Profile {
@@ -56,6 +58,8 @@ const defaults: Settings = {
   tutorialDone: false,
   sortMode: 'color',
   botLevel: 'normal',
+  tableTheme: 'green',
+  backTheme: 'classic',
 };
 
 export const settings: Settings = load(SETTINGS_KEY, defaults);

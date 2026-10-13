@@ -9,6 +9,7 @@ import { sfx, vibrate } from '../audio';
 import type { Engine, EngineScene, Quality } from './engine';
 import { Confetti } from './effects';
 import { TableEnvironment } from './environment';
+import { settings } from '../settings';
 import { findDropTarget, layoutTable, STEP, type DropTarget, type TableLayout } from './layout';
 import { BACK_CELL, cellOf, createWoodTexture } from './textures';
 import { opponentSeats } from '../game/seats';
@@ -85,7 +86,7 @@ const TINT_SELECTED = [1.18, 1.04, 0.62] as const;
 export class BoardScene implements EngineScene {
   readonly scene = new THREE.Scene();
   readonly camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 200);
-  private env = new TableEnvironment(16, 12);
+  private env = new TableEnvironment(16, 12, settings.tableTheme);
   readonly tiles: TileSet;
   private backs: TileSet;
   private ghost: TileSet;
@@ -135,8 +136,8 @@ export class BoardScene implements EngineScene {
 
   constructor(private engine: Engine, private cb: BoardCallbacks) {
     const res = engine.res;
-    this.scene.background = new THREE.Color(0x07090a);
-    this.scene.fog = new THREE.Fog(0x07090a, 30, 70);
+    this.scene.background = new THREE.Color(this.env.theme.background);
+    this.scene.fog = new THREE.Fog(this.env.theme.background, 30, 70);
     this.scene.add(this.env.group);
 
     this.tiles = new TileSet(106, res, true);
@@ -437,6 +438,7 @@ export class BoardScene implements EngineScene {
       this.tiles.hideAll();
       this.rackTiles.hideAll();
       this.selected = null;
+      this.seenAtMyTurnEnd = new Set();
     }
     const nextLoc = new Map<TileId, Loc>();
     for (const m of view.table) for (const t of m.tiles) nextLoc.set(t, 'table');
@@ -523,8 +525,33 @@ export class BoardScene implements EngineScene {
     this.loc = nextLoc;
     if (this.selected !== null && !nextLoc.has(this.selected)) this.select(null);
     this.refreshTints(glow);
+    // Empieza mi turno: resaltar lo que jugaron los demás desde mi último turno
+    const myTurnNow = view.status === 'playing' && view.turn === view.you;
+    const myTurnBefore = !!prevView && prevView.status === 'playing' && prevView.turn === prevView.you;
+    if (myTurnNow && !myTurnBefore && !newGame && animate) {
+      const fresh = view.table.flatMap((m) => m.tiles).filter((t) => !this.seenAtMyTurnEnd.has(t));
+      if (fresh.length) this.highlightNew(fresh);
+    }
+    if (!myTurnNow && myTurnBefore) this.seenAtMyTurnEnd = new Set(view.table.flatMap((m) => m.tiles));
     this.clampScroll();
     this.engine.invalidate();
+  }
+
+  /** Fichas que había en la mesa cuando terminó mi último turno. */
+  private seenAtMyTurnEnd = new Set<TileId>();
+
+  /** Pulso dorado sobre las fichas que acaba de jugar el rival (3 latidos, ~2 s). */
+  private highlightNew(tiles: TileId[]) {
+    for (const t of tiles) {
+      if (this.loc.get(t) !== 'table') continue;
+      const st = this.tiles.get(t);
+      gsap.to(st, {
+        r: 1.55, g: 1.32, b: 0.62, y: TILE_H / 2 + 0.12,
+        duration: 0.33, yoyo: true, repeat: 5, ease: 'sine.inOut', delay: 0.35,
+        onUpdate: () => this.tiles.markDirty(t),
+        onComplete: () => this.refreshTints(),
+      });
+    }
   }
 
   private tweenTile(set: TileSet, t: TileId, target: Partial<TileState>, duration: number, ease = 'power3.out', delay = 0) {
@@ -1303,6 +1330,11 @@ export class BoardScene implements EngineScene {
 
   get inCinematic(): boolean {
     return this.cinema !== null;
+  }
+
+  setTableTheme(id: string) {
+    this.env.setTheme(id, this.scene);
+    this.engine.invalidate();
   }
 
   setQuality(q: Quality) {

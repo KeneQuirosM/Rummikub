@@ -243,6 +243,16 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
       ack(r);
     });
 
+    socket.on('room:config', (cfg, ack) => {
+      if (typeof ack !== 'function') return;
+      if (!allow(socket, 'room', now())) return ack({ ok: false, error: 'RATE_LIMITED' });
+      const ctx = seatOf(socket);
+      if (!ctx) return ack({ ok: false, error: 'NOT_IN_ROOM' });
+      const r = rooms.configure(ctx.room, ctx.seat, cfg);
+      if (r.ok) broadcast(ctx.room);
+      ack(r);
+    });
+
     socket.on('game:rematch', () => {
       const ctx = seatOf(socket);
       if (!ctx) return;

@@ -20,6 +20,8 @@ export interface GameRecord {
   durationSec: number;
   /** Más fichas que coloqué en un solo turno. */
   bestPlay: number;
+  /** Esta partida cerró un torneo que gané. */
+  champion?: boolean;
 }
 
 export interface ModeTotals {
@@ -30,6 +32,8 @@ export interface ModeTotals {
   bestPlay: number;
   /** Victoria más rápida en segundos (0 = ninguna). */
   fastestWin: number;
+  /** Torneos (mejor de 3) ganados. */
+  tourneys: number;
 }
 
 interface StatsData {
@@ -41,7 +45,7 @@ interface StatsData {
 const KEY = 'rummi.stats.v1';
 const MAX_RECORDS = 20;
 
-const emptyTotals = (): ModeTotals => ({ played: 0, won: 0, streak: 0, bestStreak: 0, bestPlay: 0, fastestWin: 0 });
+const emptyTotals = (): ModeTotals => ({ played: 0, won: 0, streak: 0, bestStreak: 0, bestPlay: 0, fastestWin: 0, tourneys: 0 });
 
 export function loadStats(): StatsData {
   try {
@@ -77,6 +81,7 @@ export function addRecord(r: GameRecord): void {
     if (r.durationSec > 0 && (t.fastestWin === 0 || r.durationSec < t.fastestWin)) t.fastestWin = r.durationSec;
   } else t.streak = 0;
   t.bestPlay = Math.max(t.bestPlay, r.bestPlay);
+  if (r.champion) t.tourneys++;
   saveStats(d);
 }
 
@@ -91,6 +96,7 @@ export function combinedTotals(d: StatsData): ModeTotals {
     bestStreak: Math.max(a.bestStreak, b.bestStreak),
     bestPlay: Math.max(a.bestPlay, b.bestPlay),
     fastestWin: [a.fastestWin, b.fastestWin].filter((x) => x > 0).reduce((m, x) => (m === 0 ? x : Math.min(m, x)), 0),
+    tourneys: a.tourneys + b.tourneys,
   };
 }
 
@@ -142,6 +148,7 @@ export class GameStatsTracker {
       rivals: v.players.filter((_, i) => i !== v.you).map((p) => ({ name: p.name, avatar: p.avatar })),
       durationSec: Math.round((Date.now() - this.startedAt) / 1000),
       bestPlay: this.bestPlay,
+      ...(v.match?.champions?.includes(v.you) ? { champion: true } : {}),
     });
   }
 }

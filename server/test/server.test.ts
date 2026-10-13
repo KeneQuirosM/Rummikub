@@ -330,4 +330,46 @@ describe('RoomManager', () => {
     expect(g.turn).toBe((cur + 1) % 3);
     expect(g.racks[cur]).toHaveLength(15);
   });
+
+  it('torneo al mejor de 3: marcador, campeón y nuevo torneo', () => {
+    const rm = new RoomManager();
+    const { room } = rm.create({ name: 'A', avatar: '🦊' }, { turnSeconds: 0 }, 's0');
+    rm.join(room.code, { name: 'B', avatar: '🐼' }, undefined, 's1');
+    expect(rm.configure(room, 1, { bestOf: 3 })).toEqual({ ok: false, error: 'NOT_HOST' });
+    expect(rm.configure(room, 0, { bestOf: 7 })).toEqual({ ok: false, error: 'BAD_REQUEST' });
+    expect(rm.configure(room, 0, { bestOf: 3 })).toEqual({ ok: true });
+    expect(rm.view(room, 1).bestOf).toBe(3);
+    rm.start(room, 0);
+    const endGame = (winner: number) => {
+      const g = room.game!;
+      g.status = 'ended';
+      g.result = { winners: [winner], reason: 'out', points: [0, 0] };
+      // como si el motor terminara la partida: se cuenta el resultado
+      (rm as unknown as { countResult(r: typeof room): void }).countResult(room);
+    };
+    expect(rm.view(room, 0).match).toEqual({ bestOf: 3, game: 1, wins: [0, 0], champions: null });
+    endGame(0);
+    expect(rm.view(room, 0).match).toMatchObject({ game: 1, wins: [1, 0], champions: null });
+    rm.rematch(room, 0);
+    rm.rematch(room, 1);
+    expect(rm.view(room, 0).match).toMatchObject({ game: 2, wins: [1, 0] });
+    endGame(1);
+    rm.rematch(room, 0);
+    rm.rematch(room, 1);
+    expect(rm.view(room, 1).match).toMatchObject({ game: 3, wins: [1, 1], champions: null });
+    endGame(1);
+    expect(rm.view(room, 0).match).toMatchObject({ wins: [1, 2], champions: [1] });
+    // Revancha tras el campeón: torneo nuevo
+    rm.rematch(room, 0);
+    rm.rematch(room, 1);
+    expect(rm.view(room, 0).match).toEqual({ bestOf: 3, game: 1, wins: [0, 0], champions: null });
+  });
+
+  it('partida única: sin torneo', () => {
+    const rm = new RoomManager();
+    const { room } = rm.create({ name: 'A', avatar: '🦊' }, {}, 's0');
+    rm.join(room.code, { name: 'B', avatar: '🐼' }, undefined, 's1');
+    rm.start(room, 0);
+    expect(rm.view(room, 0)).toMatchObject({ bestOf: 1, match: null });
+  });
 });

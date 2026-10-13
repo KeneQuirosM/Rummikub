@@ -15,6 +15,10 @@ Creas una sala, compartes el link por WhatsApp y tus amigos entran con un toque;
 - **Estadísticas e historial** guardados en el teléfono: partidas, victorias, rachas, mejor jugada, victoria más rápida
   y las últimas 20 partidas (por modo: amigos / bots).
 - **Reacciones**: 16 emojis y 8 frases rápidas que cada jugador ve traducidas a su idioma (`phrase:<id>`).
+- **Torneo al mejor de 3** (online y práctica): el anfitrión elige el modo en la sala de espera (`room:config`); gana
+  quien primero llegue a 2 partidas. Marcador con trofeos en el HUD, campeón al final y "Nuevo torneo".
+- **Personalizar**: 5 colores de mesa (incl. madera y medianoche) y 5 dorsos de fichas; algunos se desbloquean con victorias.
+- **Resaltado de jugadas ajenas**: al empezar tu turno, lo que pusieron los demás desde tu último turno pulsa en dorado.
 - **Cámara cinemática al terminar**: giro alrededor de la mesa con la jugada ganadora brillando (se salta con un toque).
 - Si alguien abandona a mitad de partida, **un bot toma su lugar** y la mesa sigue.
 - Móvil primero: portrait y landscape, arrastrar y soltar o *tocar y tocar*, safe areas, Wake Lock y pantalla completa.

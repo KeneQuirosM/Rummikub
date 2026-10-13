@@ -1,4 +1,4 @@
-import { EMOTES, PHRASES, type ChatMessage, type GameErrorCode, type GameEvent, type PlayerView, type RoomErrorCode } from '@rummi/shared';
+import { EMOTES, PHRASES, winsNeeded, type ChatMessage, type GameErrorCode, type GameEvent, type PlayerView, type RoomErrorCode } from '@rummi/shared';
 import { sfx, vibrate } from '../audio';
 import type { GameController } from '../game/controller';
 import { onLangChange, t } from '../i18n';
@@ -355,6 +355,14 @@ export class GameHud {
     const me = v.players[v.you]!;
     const mine = v.status === 'playing' && v.turn === v.you;
     this.renderOpponents(v);
+    // Torneo: en qué partida vamos
+    const pill = $('match-pill');
+    pill.hidden = !v.match || v.status !== 'playing';
+    if (v.match) {
+      const vars = { game: v.match.game, max: v.match.bestOf, need: winsNeeded(v.match.bestOf) };
+      pill.textContent = t('match.pill', vars);
+      pill.title = t('match.pillTitle', vars);
+    }
     // Avisar cuando alguien abandona y el bot toma su lugar
     v.players.forEach((p, i) => {
       if (p.replaced && !this.replacedSeen.has(i) && v.status === 'playing') toast(t('game.replaced', { name: p.name }));
@@ -446,7 +454,7 @@ export class GameHud {
         return `<div class="opp ${active ? 'active' : ''} ${p.replaced ? 'left-game' : ''}" data-seat="${seat}">
           <span class="avatar">${escapeHtml(p.avatar)}<i class="dot ${p.connected ? '' : 'off'}"></i></span>
           <div class="opp-info">
-            <div class="opp-name">${escapeHtml(p.name)}</div>
+            <div class="opp-name">${escapeHtml(p.name)}${v.match && v.match.wins[seat] ? `<span class="trophies">${'🏆'.repeat(v.match.wins[seat]!)}</span>` : ''}</div>
             <div class="opp-sub"><b>${p.rackCount}</b> ${t('hud.tiles')}${status ? `<span class="opp-status">· ${escapeHtml(status)}</span>` : ''}</div>
           </div>
         </div>`;
@@ -480,7 +488,22 @@ export class GameHud {
     const r = v.result!;
     const won = r.winners.includes(v.you);
     const shared = r.winners.length > 1;
-    const title = won ? (shared ? t('end.sharedWin') : t('end.win')) : t('end.lose');
+    const m = v.match;
+    const champs = m?.champions ?? null;
+    let title = won ? (shared ? t('end.sharedWin') : t('end.win')) : t('end.lose');
+    if (m && !champs) title = won ? t('match.wonGame') : t('match.lostGame');
+    const champLine = champs
+      ? champs.includes(v.you)
+        ? t('match.youChampion')
+        : t('match.champion', { name: champs.map((c) => escapeHtml(v.players[c]?.name ?? '')).join(', ') })
+      : '';
+    const matchBoard = m
+      ? `<p class="muted" style="margin:10px 0 2px">${t('match.board')} · ${t('mode.bo3')}</p>
+         <div class="match-board">${v.players
+           .map((p, i) => `<span>${escapeHtml(p.avatar)} ${escapeHtml(p.name)}<b class="pips">${'●'.repeat(m.wins[i] ?? 0)}${'○'.repeat(Math.max(0, winsNeeded(m.bestOf) - (m.wins[i] ?? 0)))}</b></span>`)
+           .join('')}</div>`
+      : '';
+    const rematchLabel = m ? (champs ? t('match.newTourney') : t('match.next', { game: m.game + 1, max: m.bestOf })) : t('end.rematch');
     const winnerNames = r.winners.map((w) => escapeHtml(v.players[w]?.name ?? '')).join(', ');
     const reason = r.reason === 'out' ? t('end.reasonOut', { name: winnerNames }) : t('end.reasonPool');
     // Ranking: menos puntos primero
@@ -500,16 +523,18 @@ export class GameHud {
     const asked = voters.filter((i) => i !== v.you && v.rematch[i]).map((i) => escapeHtml(v.players[i]!.name));
     const html = `
       <div class="end-card">
-        <div style="font-size:54px">${won ? '🏆' : '😔'}</div>
+        <div style="font-size:54px">${champs ? (champs.includes(v.you) ? '🏆' : '🥈') : won ? '🏆' : '😔'}</div>
         <div class="end-title ${won ? 'win' : ''}">${title}</div>
+        ${champLine ? `<p class="champion">${champLine}</p>` : ''}
         <p class="muted">${reason}</p>
+        ${matchBoard}
         <ol class="rank">${rows}</ol>
         <p class="muted" style="font-size:12px;margin:0 0 6px">${t('end.points')} · ✓ = ${t('end.score')}</p>
         ${asked.length && !iAsked ? `<p style="color:var(--gold)">${t('end.rematchAsked', { name: asked.join(', ') })}</p>` : ''}
         <div class="actions-row">
           <button class="btn" id="end-menu">${t('end.menu')}</button>
           <button class="btn btn-gold" id="end-rematch" ${iAsked ? 'disabled' : ''}>${
-            iAsked ? `${t('end.rematchWaiting')} ${yes}/${voters.length}` : `${t('end.rematch')}${voters.length > 2 ? ` ${yes}/${voters.length}` : ''}`
+            iAsked ? `${t('end.rematchWaiting')} ${yes}/${voters.length}` : `${rematchLabel}${voters.length > 2 ? ` ${yes}/${voters.length}` : ''}`
           }</button>
         </div>
       </div>`;

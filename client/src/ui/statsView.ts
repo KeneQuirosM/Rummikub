@@ -29,6 +29,7 @@ function cards(tt: ModeTotals): string {
     ${card(tt.bestStreak, t('stats.bestStreak'))}
     ${card(tt.bestPlay || '–', t('stats.bestPlay'))}
     <div class="stat wide"><b>${fmtDuration(tt.fastestWin)}</b><span>${t('stats.fastestWin')}</span></div>
+    <div class="stat wide"><b>🏆 ${tt.tourneys}</b><span>${t('stats.tourneys')}</span></div>
   </div>`;
 }
 
@@ -39,7 +40,7 @@ function history(records: GameRecord[]): string {
       const mode = r.mode === 'bot' ? `🤖 ${r.level ? t(`practice.${r.level}`) : ''}` : `👥 ${t('stats.online')}`;
       const rivals = r.rivals.map((x) => escapeHtml(x.avatar)).join('');
       return `<li class="${r.won ? 'win' : ''}">
-        <span class="place">${r.won ? '🏆' : `${r.place}.º`}</span>
+        <span class="place">${r.champion ? '👑' : r.won ? '🏆' : `${r.place}.º`}</span>
         <span class="info"><b>${mode}</b> · ${rivals}<br><small>${fmtDate(r.at)} · ${t('stats.of', { n: r.players })} · ${fmtDuration(r.durationSec)}</small></span>
         <span class="pts">${r.myPoints}<small>${t('stats.pts')}</small></span>
       </li>`;

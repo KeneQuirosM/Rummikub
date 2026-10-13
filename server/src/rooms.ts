@@ -12,6 +12,9 @@ import {
   currentTable,
   DEFAULT_TURN_SECONDS,
   isReaction,
+  ALLOWED_BEST_OF,
+  winsNeeded,
+  type MatchInfo,
   forceDraw,
   forceFinish,
   MAX_CHAT_LENGTH,
@@ -63,6 +66,8 @@ export interface Room {
   counted: boolean;
   /** Plan del bot sustituto para el turno en curso. */
   botPlan: { key: string; moves: BotMove[]; play: boolean } | null;
+  /** Torneo en curso: victorias por token de asiento (sobrevive a reordenamientos). */
+  match: { bestOf: number; game: number; winsByToken: Record<string, number>; champions: string[] | null } | null;
 }
 
 export type JoinResult =
@@ -87,7 +92,11 @@ export function sanitizeAvatar(raw: unknown): string {
 export function sanitizeSettings(raw: unknown): RoomSettings {
   const r = (raw ?? {}) as Partial<RoomSettings>;
   const ts = Number(r.turnSeconds);
-  return { turnSeconds: (ALLOWED_TURN_SECONDS as readonly number[]).includes(ts) ? ts : DEFAULT_TURN_SECONDS };
+  const bo = Number(r.bestOf);
+  return {
+    turnSeconds: (ALLOWED_TURN_SECONDS as readonly number[]).includes(ts) ? ts : DEFAULT_TURN_SECONDS,
+    bestOf: (ALLOWED_BEST_OF as readonly number[]).includes(bo) ? bo : 1,
+  };
 }
 
 export function sanitizeChat(raw: unknown): string | null {
@@ -146,6 +155,7 @@ export class RoomManager {
       gamesPlayed: 0,
       counted: false,
       botPlan: null,
+      match: null,
     };
     this.rooms.set(code, room);
     return { room, seat: 0, token: seat.token };
@@ -187,8 +197,24 @@ export class RoomManager {
     return { ok: true };
   }
 
+  /** El anfitrión elige el modo (partida única / mejor de 3) en la sala de espera. */
+  configure(room: Room, seat: Seat, raw: unknown): { ok: true } | { ok: false; error: RoomErrorCode } {
+    if (room.game) return { ok: false, error: 'GAME_IN_PROGRESS' };
+    const hostAway = !room.seats[room.host]?.socketId;
+    if (seat !== room.host && !hostAway) return { ok: false, error: 'NOT_HOST' };
+    const bo = Number((raw as { bestOf?: unknown } | null)?.bestOf);
+    if (!(ALLOWED_BEST_OF as readonly number[]).includes(bo)) return { ok: false, error: 'BAD_REQUEST' };
+    room.settings.bestOf = bo;
+    return { ok: true };
+  }
+
   startGame(room: Room) {
     const n = room.seats.length;
+    // Torneo: se crea al empezar (o al empezar una revancha cuando el anterior ya tiene campeón)
+    if (room.settings.bestOf > 1) {
+      if (!room.match || room.match.champions) room.match = { bestOf: room.settings.bestOf, game: 1, winsByToken: {}, champions: null };
+      else room.match.game++;
+    } else room.match = null;
     // Alterna quién empieza en cada partida (la primera se sortea)
     const first: Seat = room.gamesPlayed === 0 ? Math.floor(this.rand() * n) : room.gamesPlayed % n;
     room.game = createGame({ players: n, turnSeconds: room.settings.turnSeconds, firstPlayer: first, now: this.now() });
@@ -315,7 +341,16 @@ export class RoomManager {
     room.counted = true;
     for (const w of g.result?.winners ?? []) {
       const s = room.seats[w];
-      if (s) s.wins++;
+      if (!s) continue;
+      s.wins++;
+      if (room.match) room.match.winsByToken[s.token] = (room.match.winsByToken[s.token] ?? 0) + 1;
+    }
+    // ¿Alguien llegó a las victorias necesarias? -> campeón(es) del torneo
+    const m = room.match;
+    if (m && !m.champions) {
+      const need = winsNeeded(m.bestOf);
+      const champs = Object.entries(m.winsByToken).filter(([, w]) => w >= need).map(([tok]) => tok);
+      if (champs.length) m.champions = champs;
     }
   }
 
@@ -388,11 +423,28 @@ export class RoomManager {
         lastEvent: null,
         result: null,
         rematch: [],
+        bestOf: room.settings.bestOf,
+        match: null,
         version: 0,
         nextMeldSeq: 1,
       };
     }
-    return viewFor(room.game, seat, { roomCode: room.code, players, rematch: [...room.rematch], host: room.host, now: this.now() });
+    return viewFor(room.game, seat, {
+      roomCode: room.code,
+      players,
+      rematch: [...room.rematch],
+      host: room.host,
+      bestOf: room.settings.bestOf,
+      match: this.matchInfo(room),
+      now: this.now(),
+    });
+  }
+
+  private matchInfo(room: Room): MatchInfo | null {
+    const m = room.match;
+    if (!m) return null;
+    const champions = m.champions ? room.seats.map((s, i) => (m.champions!.includes(s.token) ? i : -1)).filter((i) => i >= 0) : null;
+    return { bestOf: m.bestOf, game: m.game, wins: room.seats.map((s) => m.winsByToken[s.token] ?? 0), champions };
   }
 
   /** Elimina salas inactivas. Devuelve los códigos eliminados. */

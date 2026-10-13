@@ -38,6 +38,7 @@ export function openSettings(opts: { onTutorial?: () => void; inGame?: boolean }
       settings.quality,
     )}</div>
     ${opts.inGame ? '' : `<div class="row" style="flex-wrap:wrap"><span>${t('settings.timer')}</span>${seg('timer', timerOpts, settings.turnSeconds)}</div>`}
+    <div class="row"><span>${t('theme.title')}</span><button type="button" class="btn" id="st-custom" style="min-height:40px">🎨 ${t('theme.open')}</button></div>
     <div class="actions-row">
       ${opts.onTutorial ? `<button class="btn" id="st-tut">${t('settings.tutorial')}</button>` : ''}
       <button class="btn btn-gold" data-close>${t('common.ok')}</button>
@@ -54,6 +55,10 @@ export function openSettings(opts: { onTutorial?: () => void; inGame?: boolean }
   el.querySelectorAll<HTMLInputElement>('[data-sw]').forEach((inp) =>
     inp.addEventListener('change', () => updateSettings({ [inp.dataset.sw!]: inp.checked })),
   );
+  el.querySelector('#st-custom')!.addEventListener('click', () => {
+    m.close();
+    void import('./customize').then((c) => c.openCustomize());
+  });
   el.querySelector('#st-tut')?.addEventListener('click', () => {
     m.close();
     opts.onTutorial?.();

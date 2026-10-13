@@ -4,6 +4,7 @@
  */
 import * as THREE from 'three';
 import { isJoker, tileColor, tileNumber, type TileId } from '@rummi/shared';
+import { BACK_THEMES, TABLE_THEMES, type BackTheme, type TableTheme } from './themes';
 
 export const TILE_COLORS = ['#d3343b', '#1f63c6', '#e58a0c', '#1b1c22'];
 export const ATLAS_COLS = 8;
@@ -60,7 +61,7 @@ function engraved(g: CanvasRenderingContext2D, text: string, x: number, y: numbe
   g.fillText(text, x, y);
 }
 
-export function createAtlas(symbols: boolean, cellW = 128): THREE.CanvasTexture {
+export function createAtlas(symbols: boolean, cellW = 128, back: BackTheme = BACK_THEMES[0]!): THREE.CanvasTexture {
   const cellH = Math.round(cellW * 1.4);
   const canvas = document.createElement('canvas');
   canvas.width = cellW * ATLAS_COLS;
@@ -126,22 +127,7 @@ export function createAtlas(symbols: boolean, cellW = 128): THREE.CanvasTexture 
       g.textBaseline = 'middle';
       engraved(g, 'J', cellW / 2, cellH * 0.82, '#b8860b', 1.5);
     } else if (cell === BACK_CELL) {
-      const bg = g.createLinearGradient(0, 0, cellW, cellH);
-      bg.addColorStop(0, '#173b33');
-      bg.addColorStop(1, '#0d241f');
-      g.fillStyle = bg;
-      g.fillRect(0, 0, cellW, cellH);
-      g.strokeStyle = 'rgba(230,190,100,0.75)';
-      g.lineWidth = cellW * 0.035;
-      g.strokeRect(cellW * 0.12, cellH * 0.1, cellW * 0.76, cellH * 0.8);
-      g.fillStyle = 'rgba(230,190,100,0.9)';
-      g.beginPath();
-      g.moveTo(cellW / 2, cellH * 0.3);
-      g.lineTo(cellW * 0.7, cellH / 2);
-      g.lineTo(cellW / 2, cellH * 0.7);
-      g.lineTo(cellW * 0.3, cellH / 2);
-      g.closePath();
-      g.fill();
+      drawBack(g, cellW, cellH, back);
     }
     g.restore();
   }
@@ -154,6 +140,65 @@ export function createAtlas(symbols: boolean, cellW = 128): THREE.CanvasTexture 
   return tex;
 }
 
+/** Dorso de las fichas según el tema elegido. */
+function drawBack(g: CanvasRenderingContext2D, w: number, h: number, t: BackTheme) {
+  const bg = g.createLinearGradient(0, 0, w, h);
+  bg.addColorStop(0, t.from);
+  bg.addColorStop(1, t.to);
+  g.fillStyle = bg;
+  g.fillRect(0, 0, w, h);
+  g.strokeStyle = t.accent;
+  g.globalAlpha = 0.85;
+  g.lineWidth = w * 0.035;
+  g.strokeRect(w * 0.12, h * 0.1, w * 0.76, h * 0.8);
+  g.globalAlpha = 1;
+  g.fillStyle = t.accent;
+  const cx = w / 2, cy = h / 2;
+  g.beginPath();
+  if (t.pattern === 'diamond') {
+    g.moveTo(cx, h * 0.3);
+    g.lineTo(w * 0.7, cy);
+    g.lineTo(cx, h * 0.7);
+    g.lineTo(w * 0.3, cy);
+    g.closePath();
+    g.fill();
+  } else if (t.pattern === 'star') {
+    for (let i = 0; i < 10; i++) {
+      const a = -Math.PI / 2 + (i * Math.PI) / 5;
+      const r = i % 2 === 0 ? w * 0.22 : w * 0.09;
+      g.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+    }
+    g.closePath();
+    g.fill();
+  } else if (t.pattern === 'crown') {
+    const y0 = cy + w * 0.12, y1 = cy - w * 0.14;
+    g.moveTo(w * 0.28, y0);
+    g.lineTo(w * 0.28, y1);
+    g.lineTo(w * 0.39, cy - w * 0.02);
+    g.lineTo(cx, y1 - w * 0.06);
+    g.lineTo(w * 0.61, cy - w * 0.02);
+    g.lineTo(w * 0.72, y1);
+    g.lineTo(w * 0.72, y0);
+    g.closePath();
+    g.fill();
+  } else {
+    // galaxia: puntos de estrellas deterministas
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 9301 + 49297) % 233280) / 233280);
+    for (let i = 0; i < 26; i++) {
+      const x = w * (0.16 + rnd() * 0.68), y = h * (0.13 + rnd() * 0.74), r = w * (0.006 + rnd() * 0.018);
+      g.moveTo(x + r, y);
+      g.arc(x, y, r, 0, Math.PI * 2);
+    }
+    g.fill();
+    g.beginPath();
+    g.arc(cx, cy, w * 0.1, 0, Math.PI * 2);
+    g.globalAlpha = 0.5;
+    g.fill();
+    g.globalAlpha = 1;
+  }
+}
+
 function noiseCanvas(w: number, h: number, draw: (g: CanvasRenderingContext2D, img: ImageData) => void) {
   const c = document.createElement('canvas');
   c.width = w;
@@ -164,23 +209,28 @@ function noiseCanvas(w: number, h: number, draw: (g: CanvasRenderingContext2D, i
   return c;
 }
 
-/** Fieltro: verde profundo con grano fino. */
-export function createFeltTexture(): THREE.CanvasTexture {
+/** Fieltro con grano fino, del color del tema. */
+export function createFeltTexture(theme: TableTheme = TABLE_THEMES[0]!): THREE.CanvasTexture {
+  if (theme.wood) {
+    const wood = createWoodTexture(theme.felt);
+    return wood;
+  }
   const size = 256;
+  const [fr, fg, fb] = theme.felt;
   const c = noiseCanvas(size, size, (g, img) => {
     const d = img.data;
     for (let i = 0; i < size * size; i++) {
       const n = Math.random() * 18 - 9;
-      d[i * 4] = 22 + n * 0.6;
-      d[i * 4 + 1] = 82 + n;
-      d[i * 4 + 2] = 66 + n * 0.8;
+      d[i * 4] = fr + n * 0.6;
+      d[i * 4 + 1] = fg + n;
+      d[i * 4 + 2] = fb + n * 0.8;
       d[i * 4 + 3] = 255;
     }
     g.putImageData(img, 0, 0);
     // fibras sutiles
     g.globalAlpha = 0.05;
     for (let i = 0; i < 400; i++) {
-      g.strokeStyle = Math.random() < 0.5 ? '#000' : '#9fd9c0';
+      g.strokeStyle = Math.random() < 0.5 ? '#000' : theme.fiber;
       g.beginPath();
       const x = Math.random() * size, y = Math.random() * size, a = Math.random() * Math.PI;
       g.moveTo(x, y);
@@ -195,7 +245,7 @@ export function createFeltTexture(): THREE.CanvasTexture {
 }
 
 /** Madera: vetas con ruido sinusoidal. */
-export function createWoodTexture(): THREE.CanvasTexture {
+export function createWoodTexture(base: [number, number, number] = [120, 72, 40]): THREE.CanvasTexture {
   const w = 512, h = 128;
   const c = noiseCanvas(w, h, (g, img) => {
     const d = img.data;
@@ -207,9 +257,9 @@ export function createWoodTexture(): THREE.CanvasTexture {
           (Math.random() - 0.5) * 0.12;
         const k = 0.75 + v * 0.18;
         const i = (y * w + x) * 4;
-        d[i] = 120 * k;
-        d[i + 1] = 72 * k;
-        d[i + 2] = 40 * k;
+        d[i] = base[0] * k;
+        d[i + 1] = base[1] * k;
+        d[i + 2] = base[2] * k;
         d[i + 3] = 255;
       }
     }

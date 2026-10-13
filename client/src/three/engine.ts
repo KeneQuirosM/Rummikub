@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { gsap } from 'gsap';
 import { settings, type QualitySetting } from '../settings';
 import { createAtlas } from './textures';
+import { backTheme } from './themes';
 import { TileResources } from './tileset';
 
 export type Quality = 'high' | 'medium' | 'low';
@@ -19,6 +20,7 @@ export interface EngineScene {
   /** true mientras necesite animación continua (p. ej. fondo del menú). */
   continuous?(): boolean;
   setQuality?(q: Quality): void;
+  setTableTheme?(id: string): void;
   dispose(): void;
 }
 
@@ -45,7 +47,7 @@ export class Engine {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     this.renderer.autoClear = false;
-    this.res = new TileResources(createAtlas(settings.symbols));
+    this.res = new TileResources(createAtlas(settings.symbols, 128, backTheme(settings.backTheme)));
     this.applyQualitySetting(settings.quality);
     this.resizeObs = new ResizeObserver(() => this.resize());
     this.resizeObs.observe(canvas);
@@ -55,9 +57,14 @@ export class Engine {
     canvas.addEventListener('webglcontextrestored', () => this.invalidate());
   }
 
-  setSymbols(on: boolean) {
-    this.res.setAtlas(createAtlas(on, this.quality === 'low' ? 96 : 128));
+  /** Regenera el atlas de fichas (símbolos para daltónicos o dorso nuevo). */
+  rebuildAtlas() {
+    this.res.setAtlas(createAtlas(settings.symbols, this.quality === 'low' ? 96 : 128, backTheme(settings.backTheme)));
     this.invalidate();
+  }
+
+  setTableTheme(id: string) {
+    this.scene?.setTableTheme?.(id);
   }
 
   applyQualitySetting(q: QualitySetting) {

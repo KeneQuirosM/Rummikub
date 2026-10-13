@@ -55,11 +55,16 @@ async function boot() {
   onSettingsChange((s) => {
     engine.applyQualitySetting(s.quality);
   });
-  let symbols = settings.symbols;
+  let symbols = settings.symbols, back = settings.backTheme, table = settings.tableTheme;
   onSettingsChange((s) => {
-    if (s.symbols !== symbols) {
+    if (s.symbols !== symbols || s.backTheme !== back) {
       symbols = s.symbols;
-      engine.setSymbols(s.symbols);
+      back = s.backTheme;
+      engine.rebuildAtlas();
+    }
+    if (s.tableTheme !== table) {
+      table = s.tableTheme;
+      engine.setTableTheme(s.tableTheme);
     }
   });
   bindMenu();
@@ -187,6 +192,12 @@ function showLobby(code: string, tr: SocketTransport) {
     if (!r.ok) toast(t(`err.${r.error}`), 'error');
   };
   const render = (v: PlayerView) => renderLobby(v);
+  $('lobby-mode').onclick = async (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-v]');
+    if (!b || b.disabled) return;
+    const r = await tr.configure(Number(b.dataset.v));
+    if (!r.ok) toast(t(`err.${r.error}`), 'error');
+  };
   if (tr.lastState?.status === 'waiting') render(tr.lastState);
   const off = tr.on('state', (v: PlayerView) => {
     if (v.status !== 'waiting') {
@@ -222,6 +233,13 @@ function renderLobby(v: PlayerView) {
   btn.disabled = n < 2;
   btn.textContent = t('lobby.start', { n });
   $('lobby-status').textContent = n < 2 ? t('lobby.needMore') : iAmHost ? t('lobby.canStart') : t('lobby.waitHost', { name: host?.name ?? '' });
+  // Modo: solo el anfitrión lo cambia; los demás lo ven
+  const mode = $('lobby-mode');
+  mode.classList.toggle('readonly', !iAmHost);
+  mode.querySelectorAll<HTMLButtonElement>('button').forEach((b) => {
+    b.classList.toggle('on', Number(b.dataset.v) === v.bestOf);
+    b.disabled = !iAmHost;
+  });
 }
 
 async function joinRoom(code: string) {
@@ -265,6 +283,7 @@ async function joinRoom(code: string) {
 /** Elegir contra cuántos bots (1 a 3) y con qué dificultad jugar la práctica. */
 function choosePractice() {
   let level = settings.botLevel;
+  let bestOf = 1;
   const m = modal(`
     <h2>${t('practice.title')}</h2>
     <p class="muted" style="margin:0 0 6px">${t('practice.level')}</p>
@@ -272,6 +291,10 @@ function choosePractice() {
       ${(['easy', 'normal', 'hard'] as const).map((l) => `<button type="button" data-v="${l}" class="${l === level ? 'on' : ''}">${t(`practice.${l}`)}</button>`).join('')}
     </div>
     <p class="muted level-hint" id="level-hint">${t(`practice.${level}Hint`)}</p>
+    <div class="seg mode-seg" style="margin-bottom:10px">
+      <button type="button" data-bo="1" class="${bestOf === 1 ? 'on' : ''}">${t('mode.single')}</button>
+      <button type="button" data-bo="3" class="${bestOf === 3 ? 'on' : ''}">${t('mode.bo3')}</button>
+    </div>
     <div class="bots-pick">
       ${[1, 2, 3].map((n) => `<button type="button" data-n="${n}"><b>${n}</b><span>🤖 ${n === 1 ? t('practice.rival') : t('practice.rivals')}</span></button>`).join('')}
     </div>
@@ -283,19 +306,25 @@ function choosePractice() {
     m.el.querySelectorAll('.level-seg button').forEach((x) => x.classList.toggle('on', x === b));
     m.el.querySelector('#level-hint')!.textContent = t(`practice.${level}Hint`);
   });
+  m.el.querySelectorAll<HTMLButtonElement>('[data-bo]').forEach((b) =>
+    b.addEventListener('click', () => {
+      bestOf = Number(b.dataset.bo);
+      m.el.querySelectorAll('[data-bo]').forEach((x) => x.classList.toggle('on', x === b));
+    }),
+  );
   m.el.querySelector('.bots-pick')!.addEventListener('click', (e) => {
     const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-n]');
     if (!b) return;
     updateSettings({ botLevel: level });
     m.close();
-    void startPractice(false, Number(b.dataset.n));
+    void startPractice(false, Number(b.dataset.n), bestOf);
   });
 }
 
-async function startPractice(forceTutorial = false, bots = 1) {
+async function startPractice(forceTutorial = false, bots = 1, bestOf = 1) {
   const { LocalTransport } = await import('./net/local');
   // El tutorial siempre contra un bot Normal
-  const tr = new LocalTransport(profile, settings.turnSeconds, bots, forceTutorial || !settings.tutorialDone ? 'normal' : settings.botLevel);
+  const tr = new LocalTransport(profile, settings.turnSeconds, bots, forceTutorial || !settings.tutorialDone ? 'normal' : settings.botLevel, bestOf);
   await startGame(tr);
   if ((forceTutorial || !settings.tutorialDone) && session) {
     const { startTutorial } = await import('./ui/tutorial');

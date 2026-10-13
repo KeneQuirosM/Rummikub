@@ -5,6 +5,7 @@ import type {
   GameResult,
   GameStatus,
   Intent,
+  MatchInfo,
   MoveTarget,
   PlayerView,
   PublicPlayer,
@@ -302,6 +303,8 @@ export interface ViewMeta {
   players: Omit<PublicPlayer, 'rackCount' | 'opened'>[];
   rematch: boolean[];
   host?: number;
+  bestOf?: number;
+  match?: MatchInfo | null;
   now?: number;
 }
 
@@ -334,6 +337,8 @@ export function viewFor(state: GameState, seat: Seat, meta: ViewMeta): PlayerVie
     lastEvent: state.lastEvent,
     result: state.result,
     rematch: [...meta.rematch],
+    bestOf: meta.bestOf ?? 1,
+    match: meta.match ?? null,
     version: state.version,
     nextMeldSeq: state.nextMeldSeq,
   };

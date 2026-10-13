@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import type { Engine, EngineScene, Quality } from './engine';
 import { TableEnvironment } from './environment';
+import { settings } from '../settings';
 import { cellOf } from './textures';
 import { TILE_H, TileSet } from './tileset';
 
@@ -12,14 +13,14 @@ const SHOW = [
 export class HomeScene implements EngineScene {
   private scene = new THREE.Scene();
   private camera = new THREE.PerspectiveCamera(40, 1, 0.1, 200);
-  private env = new TableEnvironment(16, 12);
+  private env = new TableEnvironment(16, 12, settings.tableTheme);
   private tiles: TileSet;
   private t = 0;
   private items: { x: number; z: number; phase: number; ry: number; float: boolean }[] = [];
 
   constructor(private engine: Engine) {
-    this.scene.background = new THREE.Color(0x07090a);
-    this.scene.fog = new THREE.Fog(0x07090a, 18, 45);
+    this.scene.background = new THREE.Color(this.env.theme.background);
+    this.scene.fog = new THREE.Fog(this.env.theme.background, 18, 45);
     this.scene.add(this.env.group);
     this.tiles = new TileSet(SHOW.length + 2, engine.res, true);
     this.scene.add(this.tiles.group);
@@ -55,6 +56,11 @@ export class HomeScene implements EngineScene {
       const y = 0.9 + Math.sin(this.t * 0.9 + it.phase) * 0.35;
       this.tiles.set(i, { y, rx: Math.sin(this.t * 0.5 + it.phase) * 0.4, ry: it.ry + this.t * 0.2, rz: Math.cos(this.t * 0.4 + it.phase) * 0.3 });
     });
+  }
+
+  setTableTheme(id: string) {
+    this.env.setTheme(id, this.scene);
+    this.engine.invalidate();
   }
 
   setQuality(q: Quality) {

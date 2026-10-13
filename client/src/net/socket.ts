@@ -94,7 +94,7 @@ export class SocketTransport implements Transport {
     return r;
   }
 
-  create(settings: RoomSettings): Promise<Ack<RoomJoined>> {
+  create(settings: Partial<RoomSettings>): Promise<Ack<RoomJoined>> {
     return new Promise((resolve) =>
       this.socket.emit('room:create', { name: profile.name, avatar: profile.avatar, settings }, (r) => resolve(this.remember(r))),
     );
@@ -106,6 +106,11 @@ export class SocketTransport implements Transport {
         resolve(this.remember(r)),
       ),
     );
+  }
+
+  /** El anfitrión elige el modo: partida única o mejor de 3. */
+  configure(bestOf: number): Promise<Ack> {
+    return new Promise((resolve) => this.socket.emit('room:config', { bestOf }, resolve));
   }
 
   /** El anfitrión empieza la partida (2 a 4 jugadores). */

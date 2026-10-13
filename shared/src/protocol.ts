@@ -98,6 +98,10 @@ export interface PlayerView {
   lastEvent: GameEvent | null;
   result: GameResult | null;
   rematch: boolean[];
+  /** Modo de la sala (1 = partida única, 3 = mejor de 3). */
+  bestOf: number;
+  /** Torneo en curso (null en partida única). */
+  match: MatchInfo | null;
   version: number;
   /** Siguiente id de combinación (para predicción determinista en el cliente). */
   nextMeldSeq: number;
@@ -106,6 +110,26 @@ export interface PlayerView {
 export interface RoomSettings {
   /** 0 = sin límite */
   turnSeconds: number;
+  /** 1 = partida única, 3 = torneo al mejor de 3. */
+  bestOf: number;
+}
+
+/** Torneo al mejor de N: gana quien primero llega a ceil(N/2) partidas. */
+export interface MatchInfo {
+  bestOf: number;
+  /** Partida actual (1, 2, 3…). */
+  game: number;
+  /** Partidas ganadas por asiento. */
+  wins: number[];
+  /** Asientos campeones cuando el torneo terminó (null = sigue). */
+  champions: number[] | null;
+}
+
+export const ALLOWED_BEST_OF = [1, 3] as const;
+
+/** Partidas que hay que ganar para llevarse el torneo. */
+export function winsNeeded(bestOf: number): number {
+  return Math.ceil(bestOf / 2);
 }
 
 export interface ProfilePayload {
@@ -114,7 +138,7 @@ export interface ProfilePayload {
 }
 
 export interface CreateRoomPayload extends ProfilePayload {
-  settings: RoomSettings;
+  settings: Partial<RoomSettings>;
 }
 
 export interface JoinRoomPayload extends ProfilePayload {
@@ -165,6 +189,8 @@ export interface ClientToServerEvents {
   'game:intent': (i: Intent, ack: (r: Ack) => void) => void;
   'game:rematch': () => void;
   'room:start': (ack: (r: Ack) => void) => void;
+  /** El anfitrión cambia el modo en la sala de espera. */
+  'room:config': (cfg: { bestOf: number }, ack: (r: Ack) => void) => void;
   drag: (d: DragPayload) => void;
   emote: (e: string) => void;
   chat: (text: string) => void;

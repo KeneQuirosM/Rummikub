@@ -6,8 +6,10 @@ import {
   planBotTurn,
   turnContext,
   viewFor,
+  winsNeeded,
   type Ack,
   type BotLevel,
+  type MatchInfo,
   type DragPayload,
   type GameState,
   type Intent,
@@ -36,6 +38,8 @@ export class LocalTransport implements Transport {
   private botBusy = false;
   private bots: { name: string; avatar: string }[];
   private counted = false;
+  /** Torneo al mejor de N (práctica). */
+  private match: MatchInfo | null = null;
   private gamesPlayed = 1;
   private disposed = false;
   lastState: PlayerView | null = null;
@@ -45,12 +49,14 @@ export class LocalTransport implements Transport {
     private turnSeconds: number,
     botCount = 1,
     readonly level: BotLevel = 'normal',
+    private bestOf = 1,
     seed?: number,
   ) {
     const n = Math.max(1, Math.min(3, botCount));
     const pool = [...BOTS].sort(() => Math.random() - 0.5);
     this.bots = pool.slice(0, n);
     this.wins = new Array<number>(n + 1).fill(0);
+    if (this.bestOf > 1) this.match = { bestOf: this.bestOf, game: 1, wins: new Array<number>(n + 1).fill(0), champions: null };
     this.game = this.newGame(0, seed);
     this.tick = setInterval(() => {
       if (checkTimeout(this.game)) this.publish();
@@ -80,6 +86,8 @@ export class LocalTransport implements Transport {
       ],
       rematch: new Array<boolean>(this.bots.length + 1).fill(false),
       host: 0,
+      bestOf: this.bestOf,
+      match: this.match ? { ...this.match, wins: [...this.match.wins], champions: this.match.champions ? [...this.match.champions] : null } : null,
     });
   }
 
@@ -88,7 +96,15 @@ export class LocalTransport implements Transport {
     const g = this.game;
     if (g.status === 'ended' && g.result && !this.counted) {
       this.counted = true;
-      for (const w of g.result.winners) this.wins[w] = (this.wins[w] ?? 0) + 1;
+      for (const w of g.result.winners) {
+        this.wins[w] = (this.wins[w] ?? 0) + 1;
+        if (this.match) this.match.wins[w] = (this.match.wins[w] ?? 0) + 1;
+      }
+      const m = this.match;
+      if (m && !m.champions) {
+        const champs = m.wins.map((w, i) => (w >= winsNeeded(m.bestOf) ? i : -1)).filter((i) => i >= 0);
+        if (champs.length) m.champions = champs;
+      }
     }
     this.lastState = this.view();
     this.em.emit('state', this.lastState);
@@ -146,6 +162,11 @@ export class LocalTransport implements Transport {
   }
 
   rematch(): void {
+    // Torneo: siguiente partida, o uno nuevo si ya hubo campeón
+    if (this.match) {
+      if (this.match.champions) this.match = { bestOf: this.bestOf, game: 1, wins: this.match.wins.map(() => 0), champions: null };
+      else this.match.game++;
+    }
     // Alterna quién empieza
     this.game = this.newGame(this.gamesPlayed++ % (this.bots.length + 1));
     this.botBusy = false;
