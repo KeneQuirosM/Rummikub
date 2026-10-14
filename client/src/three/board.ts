@@ -87,7 +87,7 @@ const TINT_ACTIVE = [1.3, 1.12, 0.62] as const;
 const TINT_NORMAL = [1, 1, 1] as const;
 const TINT_PLAYED = [1.0, 0.95, 0.82] as const;
 const TINT_INVALID = [1.0, 0.68, 0.66] as const;
-const TINT_SELECTED = [1.18, 1.04, 0.62] as const;
+const TINT_SELECTED = [1.05, 0.8, 0.3] as const;
 
 export class BoardScene implements EngineScene {
   readonly scene = new THREE.Scene();
@@ -509,7 +509,7 @@ export class BoardScene implements EngineScene {
     const dealing = newGame;
     for (const [t, slot] of slots) {
       const prev = this.loc.get(t) ?? 'none';
-      const lifted = prevView && this.selection.includes(t) && this.loc.get(t) === 'rack' ? this.tileWpx * 0.25 : 0;
+      const lifted = prevView && this.selection.includes(t) && this.loc.get(t) === 'rack' ? this.tileWpx * 0.16 : 0;
       const target = { x: slot.x, y: slot.y + lifted, z: 0, rx: RACK_RX, ry: 0, rz: 0, s: this.tileWpx };
       if (prev === 'rack' && this.rackTiles.get(t).visible) {
         this.tweenTile(this.rackTiles, t, target, animate ? 0.26 : 0);
@@ -1284,7 +1284,7 @@ export class BoardScene implements EngineScene {
       if (l === 'table') this.tweenTile(this.tiles, id, { y: on ? TILE_H / 2 + 0.35 : TILE_H / 2 }, 0.15);
       else if (l === 'rack' && this.view) {
         const slot = this.rackSlots(this.rackOrder, -1).get(id);
-        if (slot) this.tweenTile(this.rackTiles, id, { y: slot.y + (on ? this.tileWpx * 0.25 : 0) }, 0.15);
+        if (slot) this.tweenTile(this.rackTiles, id, { y: slot.y + (on ? this.tileWpx * 0.16 : 0) }, 0.15);
       }
     }
     this.refreshTints();

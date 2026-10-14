@@ -18,7 +18,7 @@ RUN npm run build -w server && if [ "$SERVE_CLIENT" = "true" ]; then npm run bui
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production PORT=8080
-RUN npm init -y >/dev/null && npm install --omit=dev --no-audit --no-fund socket.io@^4.8.1 && npm cache clean --force
+RUN npm init -y >/dev/null && npm pkg set type=module && npm install --omit=dev --no-audit --no-fund socket.io@^4.8.1 && npm cache clean --force
 COPY --from=build /app/server/dist ./dist
 COPY --from=build /app/client/dist ./public
 USER node
