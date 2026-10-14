@@ -19,6 +19,12 @@ export interface BoardCallbacks {
   move(tileId: TileId, to: MoveTarget, rackIndex?: number): boolean;
   /** Mover una combinación entera. */
   moveMeld(meldId: string, to: MoveTarget): boolean;
+  /** Mover varias fichas del atril juntas (selección múltiple). */
+  moveTiles(tileIds: TileId[], to: MoveTarget): boolean;
+  /** Reordenar varias fichas del atril juntas. */
+  reorderMany(tileIds: TileId[], index: number): void;
+  /** Primera vez que se seleccionan varias fichas (para mostrar la ayuda). */
+  multiSelectHint?(count: number): void;
   reorder(tileId: TileId, index: number): void;
   drag(d: DragPayload): void;
   notMyTurn(): void;
@@ -120,7 +126,8 @@ export class BoardScene implements EngineScene {
   private baseRowWidth = 12;
   private loc = new Map<TileId, Loc>();
   private meldValid = new Map<string, boolean>();
-  private selected: TileId | null = null;
+  /** Selección: una ficha de la mesa, o una o varias del atril. */
+  private selection: TileId[] = [];
   private drag: DragState | null = null;
   private pointers = new Map<number, { x: number; y: number }>();
   private gesture: { kind: 'pan' | 'pinch' | 'scroll'; lastX: number; lastY: number; dist: number } | null = null;
@@ -437,7 +444,7 @@ export class BoardScene implements EngineScene {
       this.meldValid.clear();
       this.tiles.hideAll();
       this.rackTiles.hideAll();
-      this.selected = null;
+      this.selection = [];
       this.seenAtMyTurnEnd = new Set();
     }
     const nextLoc = new Map<TileId, Loc>();
@@ -502,7 +509,8 @@ export class BoardScene implements EngineScene {
     const dealing = newGame;
     for (const [t, slot] of slots) {
       const prev = this.loc.get(t) ?? 'none';
-      const target = { x: slot.x, y: slot.y, z: 0, rx: RACK_RX, ry: 0, rz: 0, s: this.tileWpx };
+      const lifted = prevView && this.selection.includes(t) && this.loc.get(t) === 'rack' ? this.tileWpx * 0.25 : 0;
+      const target = { x: slot.x, y: slot.y + lifted, z: 0, rx: RACK_RX, ry: 0, rz: 0, s: this.tileWpx };
       if (prev === 'rack' && this.rackTiles.get(t).visible) {
         this.tweenTile(this.rackTiles, t, target, animate ? 0.26 : 0);
       } else if (prev === 'table') {
@@ -522,8 +530,10 @@ export class BoardScene implements EngineScene {
       if (l === 'table') this.tiles.set(t, { visible: false });
       if (l === 'rack') this.rackTiles.set(t, { visible: false });
     }
+    // La selección solo sobrevive si sus fichas siguen donde estaban
+    const keep = this.selection.filter((t) => nextLoc.has(t) && nextLoc.get(t) === this.loc.get(t));
     this.loc = nextLoc;
-    if (this.selected !== null && !nextLoc.has(this.selected)) this.select(null);
+    if (keep.length !== this.selection.length) this.setSelection(keep);
     this.refreshTints(glow);
     // Empieza mi turno: resaltar lo que jugaron los demás desde mi último turno
     const myTurnNow = view.status === 'playing' && view.turn === view.you;
@@ -566,7 +576,7 @@ export class BoardScene implements EngineScene {
   }
 
   private baseTint(t: TileId): readonly [number, number, number] {
-    if (t === this.selected) return TINT_SELECTED;
+    if (this.selection.includes(t)) return TINT_SELECTED;
     if (this.loc.get(t) !== 'table') return TINT_NORMAL;
     const m = this.view?.table.find((mm) => mm.tiles.includes(t));
     if (m && !this.meldValid.get(m.id)) return TINT_INVALID;
@@ -718,7 +728,7 @@ export class BoardScene implements EngineScene {
     const top = this.rackH - this.insets.safeBottom - 12;
     const row = this.rackRows === 1 ? 0 : Math.max(0, Math.min(1, Math.floor((top - ry) / (th + this.rackGap))));
     const col = Math.max(0, Math.min(this.perRow, Math.round((rx + this.scrollX - this.rackPad - this.tileWpx / 2) / step)));
-    const n = this.rackOrder.filter((t) => t !== this.drag?.tileId).length;
+    const n = this.rackOrder.filter((t) => !this.isDragged(t) && t !== this.drag?.tileId).length;
     return Math.max(0, Math.min(n, row * this.perRow + col));
   }
 
@@ -900,6 +910,11 @@ export class BoardScene implements EngineScene {
         this.updateDrag(p.x, p.y);
         return;
       }
+      // Arrastrar una ficha seleccionada del atril mueve TODAS las seleccionadas
+      if (d.origin === 'rack' && this.selection.length > 1 && this.selection.includes(d.tileId)) {
+        d.group = this.rackOrder.filter((t) => this.selection.includes(t));
+        d.groupMeld = null;
+      }
       d.started = true;
       this.select(null);
       sfx.pick();
@@ -988,7 +1003,7 @@ export class BoardScene implements EngineScene {
   private layoutRackPreview() {
     if (!this.view) return;
     const d = this.drag;
-    const order = this.rackOrder.filter((t) => t !== d?.tileId);
+    const order = this.rackOrder.filter((t) => !this.isDragged(t) && t !== d?.tileId);
     const slots = this.rackSlots(order, d && d.region === 'rack' ? d.rackIndex : -1);
     for (const [t, s] of slots) this.tweenTile(this.rackTiles, t, { x: s.x, y: s.y }, 0.15);
   }
@@ -1067,7 +1082,35 @@ export class BoardScene implements EngineScene {
     }
   }
 
-  /** Devuelve una ficha a su sitio según la vista actual. */
+  /** Soltar varias fichas del atril: a la mesa (juntas) o reordenarlas en el atril. */
+  private finishRackGroupDrag(d: DragState, group: TileId[]) {
+    this.placeholder.scale.set(1, 1, 1);
+    if (d.region === 'rack') {
+      sfx.rack();
+      this.cb.reorderMany(group, d.rackIndex >= 0 ? d.rackIndex : this.rackOrder.length);
+      this.restoreTile(group);
+      return;
+    }
+    const v = this.view;
+    if (!v || v.status !== 'playing' || v.turn !== v.you) {
+      this.cb.notMyTurn();
+      this.restoreTile(group);
+      return;
+    }
+    sfx.drop();
+    const target = d.target ?? { kind: 'new' };
+    const to: MoveTarget = target.kind === 'meld' ? { kind: 'meld', meldId: target.meldId!, index: target.index ?? 0 } : { kind: 'new' };
+    for (const t of group) {
+      this.loc.set(t, 'table');
+      this.rackTiles.set(t, { visible: false });
+    }
+    if (!this.cb.moveTiles(group, to)) {
+      sfx.invalid();
+      vibrate([20, 40, 20]);
+    }
+    this.restoreTile(group);
+  }
+
   /** Soltar una combinación entera: unir, mover a espacio libre o devolver al atril. */
   private finishGroupDrag(d: DragState, group: TileId[], meldId: string) {
     this.placeholder.scale.set(1, 1, 1);
@@ -1101,6 +1144,7 @@ export class BoardScene implements EngineScene {
     this.restoreTile(group);
   }
 
+  /** Devuelve una o varias fichas a su sitio según la vista actual. */
   private restoreTile(t: TileId | TileId[]) {
     for (const x of Array.isArray(t) ? t : [t]) {
       const where = this.loc.get(x);
@@ -1118,6 +1162,10 @@ export class BoardScene implements EngineScene {
     vibrate(12);
     if (d.group && d.groupMeld) {
       this.finishGroupDrag(d, d.group, d.groupMeld);
+      return;
+    }
+    if (d.group) {
+      this.finishRackGroupDrag(d, d.group);
       return;
     }
     if (d.region === 'rack') {
@@ -1160,30 +1208,38 @@ export class BoardScene implements EngineScene {
 
   private onTap(x: number, y: number, hit: TileId | null) {
     const region = this.regionAt(y);
-    const sel = this.selected;
-    if (sel === null) {
+    const sel = this.selection;
+    if (sel.length === 0) {
       if (hit !== null && (region === 'rack' || this.canMoveTableTile(hit))) {
         this.select(hit);
         sfx.pick();
       }
       return;
     }
-    if (hit === sel) {
-      this.select(null);
+    // Tocar una ficha ya seleccionada la quita de la selección
+    if (hit !== null && sel.includes(hit)) {
+      this.setSelection(sel.filter((t) => t !== hit));
+      sfx.rack();
       return;
     }
-    const selLoc = this.loc.get(sel);
+    const selLoc = this.loc.get(sel[0]!);
     if (region === 'rack') {
-      if (hit !== null && selLoc === 'rack') {
-        // Cambiar selección dentro del atril
-        this.select(hit);
+      if (hit !== null && this.loc.get(hit) === 'rack') {
+        // Selección múltiple en el atril: tocar suma fichas
+        if (selLoc === 'rack') {
+          if (sel.length < 13) {
+            this.setSelection([...sel, hit]);
+            if (sel.length === 1) this.cb.multiSelectHint?.(2);
+          }
+        } else this.select(hit);
         sfx.pick();
         return;
       }
+      // Tocar un hueco del atril: llevar ahí la selección
       const idx = this.rackIndexAt(x, this.h - y);
       this.select(null);
-      if (selLoc === 'rack') this.cb.reorder(sel, idx);
-      else this.cb.move(sel, { kind: 'rack' }, idx);
+      if (selLoc === 'rack') this.cb.reorderMany(sel, idx);
+      else this.cb.move(sel[0]!, { kind: 'rack' }, idx);
       sfx.rack();
       return;
     }
@@ -1198,37 +1254,41 @@ export class BoardScene implements EngineScene {
       const box = this.layout.melds.find((b) => b.tiles.includes(hit))!;
       const p = this.screenToTable(x, y, TILE_H) ?? { x: 0, z: 0 };
       const tp = this.layout.pos.get(hit)!;
-      const others = box.tiles.filter((t) => t !== sel);
+      const others = box.tiles.filter((t) => !sel.includes(t));
       const i = others.indexOf(hit);
       target = { kind: 'meld', meldId: box.id, index: p.x > tp.x ? i + 1 : i };
     } else {
       const p = this.screenToTable(x, y);
       target = p ? findDropTarget(this.layout, p.x, p.z, sel) : { kind: 'new' };
     }
+    const moving = this.rackOrder.filter((t) => sel.includes(t));
     this.select(null);
     const to: MoveTarget = target.kind === 'meld' ? { kind: 'meld', meldId: target.meldId!, index: target.index ?? 0 } : { kind: 'new' };
     sfx.drop();
     vibrate(12);
-    if (!this.cb.move(sel, to)) sfx.invalid();
+    const ok = sel.length > 1 && selLoc === 'rack' ? this.cb.moveTiles(moving, to) : this.cb.move(sel[0]!, to);
+    if (!ok) sfx.invalid();
   }
 
   private select(t: TileId | null) {
-    const prev = this.selected;
-    this.selected = t;
-    for (const id of [prev, t]) {
-      if (id === null) continue;
+    this.setSelection(t === null ? [] : [t]);
+  }
+
+  /** Cambia la selección y levanta/baja las fichas afectadas. */
+  private setSelection(next: TileId[]) {
+    const prev = this.selection;
+    this.selection = next;
+    for (const id of new Set([...prev, ...next])) {
+      const on = next.includes(id);
       const l = this.loc.get(id);
-      const set = l === 'table' ? this.tiles : this.rackTiles;
-      const st = set.get(id);
-      if (l === 'table') this.tweenTile(set, id, { y: id === t ? TILE_H / 2 + 0.35 : TILE_H / 2 }, 0.15);
+      if (l === 'table') this.tweenTile(this.tiles, id, { y: on ? TILE_H / 2 + 0.35 : TILE_H / 2 }, 0.15);
       else if (l === 'rack' && this.view) {
         const slot = this.rackSlots(this.rackOrder, -1).get(id);
-        if (slot) this.tweenTile(set, id, { y: slot.y + (id === t ? this.tileWpx * 0.25 : 0) }, 0.15);
+        if (slot) this.tweenTile(this.rackTiles, id, { y: slot.y + (on ? this.tileWpx * 0.25 : 0) }, 0.15);
       }
-      void st;
     }
     this.refreshTints();
-    this.cb.selectionChange?.(t);
+    this.cb.selectionChange?.(next[0] ?? null);
   }
 
   clearSelection() {
@@ -1375,7 +1435,12 @@ export class BoardScene implements EngineScene {
 
   /** Posición en pantalla (px) de una ficha de la mesa (depuración / tests e2e). */
   screenPosOfTile(t: TileId): { x: number; y: number } | null {
-    if (this.loc.get(t) !== 'table') return null;
+    const where = this.loc.get(t);
+    if (where === 'rack') {
+      const r = this.rackTiles.get(t);
+      return { x: r.x, y: this.h - r.y };
+    }
+    if (where !== 'table') return null;
     const st = this.tiles.get(t);
     this.tmpV.set(st.x, st.y, st.z).project(this.camera);
     return { x: ((this.tmpV.x + 1) / 2) * this.w, y: ((1 - this.tmpV.y) / 2) * this.mainH };

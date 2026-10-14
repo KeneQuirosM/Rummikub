@@ -10,6 +10,7 @@ Creas una sala, compartes el link por WhatsApp y tus amigos entran con un toque;
 - Modo práctica contra **1 a 3 bots** en tres niveles (Fácil / Normal / Difícil) que funciona sin conexión.
   Difícil reorganiza toda la mesa con un solucionador (cubre todas las fichas de la mesa + el máximo del atril).
   Torneos deterministas en los tests: Normal le gana ~80 % a Fácil y Difícil ~85 % a Normal.
+- **Varias fichas a la vez**: tocar fichas del atril las selecciona (se levantan en dorado); arrastrar cualquiera de ellas (o tocar el destino) lleva todas juntas a la mesa en un único movimiento (`moveTiles`), que se deshace con un solo "Deshacer".
 - **Mover combinaciones enteras**: mantener presionada una ficha de la mesa (o Shift + arrastrar) levanta su combinación;
   se suelta sobre otra para unirlas, en un espacio libre o en el atril (intención `moveMeld`, un solo paso de deshacer).
 - **Estadísticas e historial** guardados en el teléfono: partidas, victorias, rachas, mejor jugada, victoria más rápida

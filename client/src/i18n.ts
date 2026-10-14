@@ -110,6 +110,7 @@ const es = {
 <p><b>Después de abrir</b> puedes reorganizar la mesa: dividir, unir, mover y reemplazar comodines. Al terminar tu turno todas las combinaciones deben ser válidas.</p>
 <p>Si no puedes (o no quieres) jugar, <b>roba</b> una ficha. Si se acaba el tiempo, tu turno se revierte y robas.</p>
 <p>Si se acaba el pozo, gana quien tenga menos puntos en el atril.</p>
+<p><b>Varias fichas a la vez:</b> toca fichas de tu atril para seleccionarlas (se levantan) y arrastra cualquiera: se mueven todas juntas. También puedes tocar el destino.</p>
 <p><b>Mover combinaciones:</b> mantén presionada una ficha de la mesa (o Shift + arrastrar) para llevarte su combinación entera: suéltala sobre otra para unirlas, en un espacio libre o en tu atril.</p>
 <p><b>Controles:</b> arrastra fichas o tócalas y luego toca el destino. Atajos: <kbd>Enter</kbd> terminar, <kbd>Z</kbd> deshacer, <kbd>Espacio</kbd> robar.</p>`,
   'howto.tutorial': 'Tutorial interactivo',
@@ -122,6 +123,7 @@ const es = {
   'tut.4': 'Tu primera jugada debe sumar <b>30 puntos</b>. El contador de apertura te ayuda. Las combinaciones válidas brillan; las inválidas se ven rojas.',
   'tut.5': 'Pulsa <b>Terminar</b> para confirmar o <b>Robar</b> si no puedes jugar. <b>Deshacer</b> revierte movimientos del turno.',
   'offline.banner': 'Sin conexión',
+  'hint.multi': 'Toca más fichas para sumarlas y arrastra cualquiera para moverlas juntas',
   'mode.single': 'Partida única',
   'mode.bo3': 'Mejor de 3',
   'match.pill': '🏆 {game}/{max}',
@@ -318,6 +320,7 @@ const en: Dict = {
 <p><b>After opening</b> you can rearrange the table: split, join, move tiles and replace jokers. When you end your turn every set must be valid.</p>
 <p>If you can't (or don't want to) play, <b>draw</b> a tile. If time runs out your turn is reverted and you draw.</p>
 <p>If the pool runs out, the lowest points on the rack wins.</p>
+<p><b>Several tiles at once:</b> tap tiles on your rack to select them (they lift) and drag any of them: they all move together. You can also tap the destination.</p>
 <p><b>Moving sets:</b> press and hold a tile on the table (or Shift + drag) to pick up its whole set: drop it on another set to join them, on empty space, or on your rack.</p>
 <p><b>Controls:</b> drag tiles, or tap a tile and then tap the destination. Shortcuts: <kbd>Enter</kbd> end turn, <kbd>Z</kbd> undo, <kbd>Space</kbd> draw.</p>`,
   'howto.tutorial': 'Interactive tutorial',
@@ -330,6 +333,7 @@ const en: Dict = {
   'tut.4': 'Your first play must total <b>30 points</b>. The opening counter helps. Valid sets glow; invalid ones turn red.',
   'tut.5': 'Press <b>End turn</b> to confirm or <b>Draw</b> if you cannot play. <b>Undo</b> reverts moves this turn.',
   'offline.banner': 'Offline',
+  'hint.multi': 'Tap more tiles to add them, then drag any of them to move them together',
   'mode.single': 'Single game',
   'mode.bo3': 'Best of 3',
   'match.pill': '🏆 {game}/{max}',

@@ -2,6 +2,7 @@ import {
   analyzeMeld,
   applyMeldMove,
   applyMove,
+  applyMultiMove,
   compareByColor,
   compareByNumber,
   openingPoints,
@@ -176,6 +177,50 @@ export class GameController {
     this.em.emit('change', next, prev);
     void this.send({ type: 'move', tileId, to });
     return true;
+  }
+
+  /** Mueve varias fichas del atril juntas (predicción inmediata + intención al servidor). */
+  moveTiles(tileIds: TileId[], to: MoveTarget): boolean {
+    const v = this.view;
+    if (!v) return false;
+    if (!this.isMyTurn) {
+      this.em.emit('error', 'NOT_YOUR_TURN');
+      return false;
+    }
+    let seq = v.nextMeldSeq;
+    const r = applyMultiMove(turnCtx(v), { rack: v.rack, table: v.table }, tileIds, to, () => `m${seq++}`);
+    if (!r.ok) {
+      void this.send({ type: 'moveTiles', tileIds, to });
+      return false;
+    }
+    const startRack = [...v.rack, ...v.playedThisTurn];
+    const rackSet = new Set(r.snapshot.rack);
+    const next: PlayerView = {
+      ...v,
+      rack: r.snapshot.rack,
+      table: r.snapshot.table,
+      playedThisTurn: startRack.filter((t) => !rackSet.has(t)),
+      nextMeldSeq: seq,
+      canUndo: true,
+      players: v.players.map((p, i) => (i === v.you ? { ...p, rackCount: r.snapshot.rack.length } : p)) as PlayerView['players'],
+    };
+    const prev = this.view;
+    this.view = next;
+    this.syncRackOrder(next.rack);
+    this.em.emit('change', next, prev);
+    void this.send({ type: 'moveTiles', tileIds, to });
+    return true;
+  }
+
+  /** Reordena varias fichas del atril juntas (solo local). */
+  reorderMany(tileIds: TileId[], index: number) {
+    const v = this.view;
+    if (!v) return;
+    const moving = this.rackOrder.filter((t) => tileIds.includes(t));
+    const rest = this.rackOrder.filter((t) => !tileIds.includes(t));
+    const i = Math.max(0, Math.min(rest.length, index));
+    this.rackOrder = [...rest.slice(0, i), ...moving, ...rest.slice(i)];
+    this.em.emit('change', v, v);
   }
 
   /** Mueve una combinación entera (predicción inmediata + intención al servidor). */

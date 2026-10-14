@@ -108,6 +108,35 @@ export function applyMove(
 }
 
 /**
+ * Mueve varias fichas del atril a la vez (función pura): todas a una combinación nueva
+ * o insertadas juntas en una existente a partir de `index`. Es un solo paso para deshacer.
+ */
+export function applyMultiMove(
+  ctx: TurnContext,
+  current: TurnSnapshot,
+  tileIds: readonly TileId[],
+  to: MoveTarget,
+  newMeldId: () => string,
+): RuleResult<{ snapshot: TurnSnapshot }> {
+  if (tileIds.length === 0 || new Set(tileIds).size !== tileIds.length) return { ok: false, error: 'BAD_INTENT' };
+  if (!tileIds.every((t) => current.rack.includes(t))) return { ok: false, error: 'TILE_NOT_AVAILABLE' };
+  if (to.kind === 'rack') return { ok: true, snapshot: cloneSnapshot(current) };
+  let snap = current;
+  let target: MoveTarget = to;
+  let lastId = '';
+  const gen = () => (lastId = newMeldId());
+  for (let i = 0; i < tileIds.length; i++) {
+    const r = applyMove(ctx, snap, tileIds[i]!, target, gen);
+    if (!r.ok) return r;
+    snap = r.snapshot;
+    // Tras la primera ficha, las demás van a la misma combinación
+    if (to.kind === 'new' && i === 0) target = { kind: 'meld', meldId: lastId, index: 1 };
+    else if (target.kind === 'meld') target = { ...target, index: target.index + 1 };
+  }
+  return { ok: true, snapshot: snap };
+}
+
+/**
  * Mueve una combinación entera (función pura).
  *  - a otra combinación: se unen insertando todas sus fichas en `index` (y se ordena si hace falta);
  *  - a 'new': la combinación pasa al final de la mesa (reacomodar);

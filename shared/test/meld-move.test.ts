@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { applyIntent, createGame, sanitizeIntent } from '../src/game.js';
-import { applyMeldMove, applyTurn, type TurnContext } from '../src/rules.js';
+import { applyMeldMove, applyMultiMove, applyTurn, type TurnContext } from '../src/rules.js';
 import { B, K, O, R } from './helpers.js';
 
 const ctx = (rack: number[], table: number[][], opened: boolean): TurnContext => ({
@@ -66,5 +66,44 @@ describe('mover una combinación entera', () => {
     expect(sanitizeIntent({ type: 'moveMeld', meldId: 'm1', to: { kind: 'rack' } })).toEqual({ type: 'moveMeld', meldId: 'm1', to: { kind: 'rack' } });
     expect(sanitizeIntent({ type: 'moveMeld', meldId: 7, to: { kind: 'rack' } })).toBeNull();
     expect(sanitizeIntent({ type: 'moveMeld', meldId: 'm1', to: { kind: 'meld', meldId: 'x', index: 99 } })).toBeNull();
+  });
+});
+
+describe('mover varias fichas del atril a la vez', () => {
+  it('tres fichas a una combinación nueva, en un solo paso de deshacer', () => {
+    const g = createGame({ seed: 5, firstPlayer: 0 });
+    g.racks[0] = [R(10), B(10), O(10), K(3)];
+    g.working = { rack: [...g.racks[0]!], table: [] };
+    expect(applyIntent(g, 0, { type: 'moveTiles', tileIds: [R(10), B(10), O(10)], to: { kind: 'new' } })).toEqual({ ok: true });
+    expect(g.working.table).toHaveLength(1);
+    expect([...g.working.table[0]!.tiles].sort()).toEqual([R(10), B(10), O(10)].sort());
+    expect(g.working.rack).toEqual([K(3)]);
+    expect(applyIntent(g, 0, { type: 'endTurn' })).toEqual({ ok: true }); // apertura de 30
+    expect(g.opened[0]).toBe(true);
+  });
+
+  it('dos fichas insertadas juntas en una escalera existente', () => {
+    const c = ctx([R(4), R(5)], [[R(1), R(2), R(3)]], true);
+    const r = applyMultiMove(c, c.start, [R(4), R(5)], { kind: 'meld', meldId: 't0', index: 3 }, () => 'x');
+    expect(r.ok && r.snapshot.table[0]!.tiles).toEqual([R(1), R(2), R(3), R(4), R(5)]);
+  });
+
+  it('deshacer devuelve las tres de una vez', () => {
+    const g = createGame({ seed: 6, firstPlayer: 0 });
+    g.racks[0] = [R(10), B(10), O(10), K(3)];
+    g.working = { rack: [...g.racks[0]!], table: [] };
+    applyIntent(g, 0, { type: 'moveTiles', tileIds: [R(10), B(10), O(10)], to: { kind: 'new' } });
+    applyIntent(g, 0, { type: 'undo' });
+    expect(g.working.rack).toHaveLength(4);
+    expect(g.working.table).toHaveLength(0);
+  });
+
+  it('valida: solo fichas de mi atril, sin repetidas, sin abrir no toca la mesa', () => {
+    const c = ctx([R(4), R(5)], [[R(1), R(2), R(3)]], false);
+    expect(applyMultiMove(c, c.start, [R(4), R(4)], { kind: 'new' }, () => 'x')).toEqual({ ok: false, error: 'BAD_INTENT' });
+    expect(applyMultiMove(c, c.start, [R(1)], { kind: 'new' }, () => 'x')).toEqual({ ok: false, error: 'TILE_NOT_AVAILABLE' });
+    expect(applyMultiMove(c, c.start, [R(4), R(5)], { kind: 'meld', meldId: 't0', index: 3 }, () => 'x')).toEqual({ ok: false, error: 'NOT_OPENED' });
+    expect(sanitizeIntent({ type: 'moveTiles', tileIds: [1, 2, 999], to: { kind: 'new' } })).toBeNull();
+    expect(sanitizeIntent({ type: 'moveTiles', tileIds: [1, 2], to: { kind: 'new' } })).toEqual({ type: 'moveTiles', tileIds: [1, 2], to: { kind: 'new' } });
   });
 });

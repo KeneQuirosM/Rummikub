@@ -13,6 +13,7 @@ import type {
 import {
   applyMeldMove,
   applyMove,
+  applyMultiMove,
   applyTurn,
   cloneSnapshot,
   scoring,
@@ -173,6 +174,12 @@ export function sanitizeIntent(raw: unknown): Intent | null {
     case 'draw':
     case 'endTurn':
       return { type: i.type };
+    case 'moveTiles': {
+      const ids = i.tileIds;
+      if (!Array.isArray(ids) || ids.length < 1 || ids.length > 13 || !ids.every(isValidTileId)) return null;
+      const target = sanitizeTarget(i.to);
+      return target ? { type: 'moveTiles', tileIds: [...ids], to: target } : null;
+    }
     case 'moveMeld': {
       if (typeof i.meldId !== 'string' || !i.meldId || i.meldId.length > 16) return null;
       const target = sanitizeTarget(i.to);
@@ -211,6 +218,13 @@ export function applyIntent(state: GameState, seat: Seat, intent: Intent, now = 
   switch (intent.type) {
     case 'move': {
       const r = applyMove(turnContext(state), state.working, intent.tileId, intent.to, meldIdGen(state));
+      if (!r.ok) return r;
+      state.history.push(state.working);
+      state.working = r.snapshot;
+      break;
+    }
+    case 'moveTiles': {
+      const r = applyMultiMove(turnContext(state), state.working, intent.tileIds, intent.to, meldIdGen(state));
       if (!r.ok) return r;
       state.history.push(state.working);
       state.working = r.snapshot;

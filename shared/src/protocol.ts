@@ -12,6 +12,8 @@ export type Intent =
   | { type: 'move'; tileId: TileId; to: MoveTarget }
   /** Mover una combinación entera: a otra (unirlas), a un espacio libre o de vuelta al atril. */
   | { type: 'moveMeld'; meldId: string; to: MoveTarget }
+  /** Mover varias fichas del atril juntas (selección múltiple). */
+  | { type: 'moveTiles'; tileIds: TileId[]; to: MoveTarget }
   | { type: 'undo' }
   | { type: 'reset' }
   | { type: 'draw' }

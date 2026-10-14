@@ -357,6 +357,19 @@ async function startGame(transport: Transport, initial?: PlayerView) {
   const board: BoardScene = new mods.BoardScene(engine, {
     move: (tile, to, rackIndex) => ctl.move(tile, to, rackIndex),
     moveMeld: (meldId, to) => ctl.moveMeld(meldId, to),
+    moveTiles: (ids, to) => ctl.moveTiles(ids, to),
+    reorderMany: (ids, index) => ctl.reorderMany(ids, index),
+    multiSelectHint: () => {
+      // Ayuda las primeras veces que se seleccionan varias fichas
+      try {
+        const n = Number(localStorage.getItem('rummi.hintMulti') ?? '0');
+        if (n >= 3) return;
+        localStorage.setItem('rummi.hintMulti', String(n + 1));
+      } catch {
+        /* noop */
+      }
+      toast(t('hint.multi'));
+    },
     reorder: (tile, index) => ctl.reorderRack(tile, index),
     drag: (d) => transport.drag(d),
     notMyTurn: () => toast(t('err.NOT_YOUR_TURN'), 'error'),

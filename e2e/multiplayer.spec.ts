@@ -238,3 +238,36 @@ test('si un jugador cierra la app, a los 30 s el bot juega por él', async ({ br
   await expect.poll(async () => (await view(A))!.turn === (await view(A))!.you, { timeout: 25_000 }).toBe(true);
   expect((await view(A))!.status).toBe('playing');
 });
+
+test('seleccionar 3 fichas del atril y arrastrarlas juntas a la mesa (un solo deshacer)', async ({ browser }) => {
+  const P = await player(browser, 'Multi', true);
+  await P.goto('/');
+  await P.click('#btn-practice');
+  await P.click('.bots-pick button[data-n="1"]');
+  await expect(P.locator('#hud')).toBeVisible();
+  await expect.poll(async () => (await view(P))?.rack.length ?? 0).toBe(14);
+  await P.waitForTimeout(1500); // termina la animación de reparto
+  const order = await P.evaluate(() => (window as unknown as { __rummi: { rackOrder(): number[] } }).__rummi.rackOrder());
+  const picked = order.slice(0, 3);
+  const pos = (t: number) => P.evaluate((tt) => (window as unknown as { __rummi: { tilePos(t: number): { x: number; y: number } | null } }).__rummi.tilePos(tt), t);
+  for (const t of picked) {
+    const q = (await pos(t))!;
+    await P.mouse.click(q.x, q.y);
+    await P.waitForTimeout(250);
+  }
+  // Arrastrar la del medio: deben ir las tres
+  const s = (await pos(picked[1]!))!;
+  const vp = P.viewportSize()!;
+  await P.mouse.move(s.x, s.y);
+  await P.mouse.down();
+  for (let k = 1; k <= 12; k++) await P.mouse.move(s.x + ((vp.width / 2 - s.x) * k) / 12, s.y + ((vp.height * 0.4 - s.y) * k) / 12);
+  await P.mouse.up();
+  await expect.poll(async () => (await view(P))!.rack.length).toBe(11);
+  const v = (await view(P))!;
+  expect(v.table).toHaveLength(1);
+  expect([...v.table[0]!.tiles].sort((a, b) => a - b)).toEqual([...picked].sort((a, b) => a - b));
+  // Un solo "Deshacer" las devuelve todas
+  await P.click('#act-undo');
+  await expect.poll(async () => (await view(P))!.rack.length).toBe(14);
+  expect((await view(P))!.table).toHaveLength(0);
+});
