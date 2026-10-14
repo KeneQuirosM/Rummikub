@@ -173,7 +173,7 @@ cliente pequeño (~14 KB gzip) y sin acoplar el modelo de datos a un framework. 
 - **Orden dentro de una combinación**: se respeta el orden del jugador si es válido; si no, las escaleras se ordenan solas y los comodines rellenan huecos.
 - **Dividir**: sacar una ficha del interior de una escalera válida la parte en dos combinaciones.
 - **Timeout**: se revierte el turno y se roba **una** ficha (como pide el enunciado; el reglamento oficial usa 3).
-- **Desconexión**: el turno sigue corriendo; si vence, se aplica el timeout normal. Las salas se borran tras 30 min sin nadie conectado.
+- **Desconexión**: se espera 30 s; si no vuelve, el bot juega por él hasta que regrese con su token. Las salas se borran tras 30 min sin nadie conectado.
 - **Revancha**: requiere que ambos acepten; se alterna quién empieza. El marcador de victorias se mantiene en la sala.
 - **Profundidad de campo**: se omitió (coste de post-procesado alto en gama media); la sensación de profundidad viene de la
   perspectiva, niebla y viñeta CSS.
