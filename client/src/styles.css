@@ -103,7 +103,14 @@ button { font: inherit; color: inherit; touch-action: manipulation; }
 }
 .logo span { color: var(--gold); text-shadow: 0 6px 30px rgba(242, 199, 92, 0.45); }
 .tagline { margin: 12px 0 0; color: var(--muted); font-size: 16px; }
-.menu-list { display: flex; flex-direction: column; gap: 12px; width: min(420px, 100%); margin-bottom: 4vh; }
+.credit {
+  position: absolute; right: calc(var(--sar) + 16px); bottom: calc(var(--sab) + 12px); margin: 0;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+  font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); opacity: .8; pointer-events: none;
+}
+.credit b { color: var(--gold); font-weight: 700; letter-spacing: .1em; }
+#app-version { text-transform: none; letter-spacing: .04em; font-variant-numeric: tabular-nums; opacity: .8; }
+.menu-list { display: flex; flex-direction: column; gap: 12px; width: min(420px, 100%); margin-bottom: max(4vh, 40px); }
 .menu-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .profile-chip {
   position: absolute; top: calc(12px + var(--sat)); right: calc(12px + var(--sar));

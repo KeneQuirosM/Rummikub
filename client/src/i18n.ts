@@ -3,6 +3,7 @@ export type Lang = 'es' | 'en';
 const es = {
   'app.title': 'Rummi 3D',
   'app.tagline': 'Fichas, mesa y hasta 4 amigos. Sin instalar nada.',
+  'app.credit': 'Desarrollado por',
   'loading': 'Cargando…',
   'menu.playFriend': 'Jugar con amigos',
   'menu.join': 'Unirme con código',
@@ -213,6 +214,7 @@ type Dict = Record<keyof typeof es, string>;
 const en: Dict = {
   'app.title': 'Rummi 3D',
   'app.tagline': 'Tiles, a table and up to 4 friends. Nothing to install.',
+  'app.credit': 'Developed by',
   'loading': 'Loading…',
   'menu.playFriend': 'Play with friends',
   'menu.join': 'Join with code',

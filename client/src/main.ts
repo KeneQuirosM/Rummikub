@@ -39,6 +39,11 @@ let pendingSocket: SocketTransport | null = null;
 async function boot() {
   setLang(settings.lang);
   applyI18n(document.body);
+  const ver = document.getElementById('app-version');
+  if (ver) {
+    ver.textContent = `v${__APP_VERSION__}`;
+    ver.title = `${__BUILD_DATE__} · ${__BUILD_ID__}`;
+  }
   progress(0.1, t('loading'));
   unlockAudio();
   setupConnectivityBanner();
