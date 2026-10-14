@@ -289,15 +289,33 @@ describe('RoomManager', () => {
     expect(room.seats[leaver]!.replaced).toBe(false);
   });
 
-  it('si queda un solo humano la partida termina', () => {
+  it('si queda un solo humano la partida sigue contra el bot', () => {
     const rm = new RoomManager();
     const room = fourRoom(rm);
     rm.start(room, 0);
     rm.leave(room.code, 1, 's1');
-    expect(room.game!.status).toBe('playing');
     rm.leave(room.code, 2, 's2');
-    expect(room.game!.status).toBe('ended');
-    expect(room.game!.result!.points).toHaveLength(3);
+    expect(room.game!.status).toBe('playing');
+    expect(room.seats.map((s) => s.replaced)).toEqual([false, true, true]);
+    // En 1 vs 1 también: quien sale es reemplazado por el bot
+    const rm2 = new RoomManager();
+    const { room: r2 } = rm2.create({ name: 'A', avatar: '🦊' }, {}, 'a');
+    rm2.join(r2.code, { name: 'B', avatar: '🐼' }, undefined, 'b');
+    rm2.start(r2, 0);
+    rm2.leave(r2.code, 1, 'b');
+    expect(r2.game!.status).toBe('playing');
+    expect(rm2.view(r2, 0).players[1]).toMatchObject({ isBot: true, replaced: true });
+  });
+
+  it('nadie conectado: los bots no juegan solos', () => {
+    const rm = new RoomManager();
+    const room = fourRoom(rm);
+    rm.start(room, 0);
+    const g = room.game!;
+    rm.leave(room.code, g.turn, `s${g.turn}`);
+    expect(rm.isBotTurn(room)).toBe(true);
+    for (let i = 0; i < 3; i++) if (room.seats[i]!.socketId) rm.disconnect(room.code, i, `s${i}`);
+    expect(rm.isBotTurn(room)).toBe(false);
   });
 
   it('revancha parcial: sigue solo con quienes siguen conectados', () => {
@@ -315,7 +333,7 @@ describe('RoomManager', () => {
     expect(room.game!.numPlayers).toBe(2);
   });
 
-  it('sin límite de tiempo, un jugador desconectado en su turno roba tras 60 s', () => {
+  it('quien se desconecta y no vuelve en 30 s es relevado por el bot; al volver recupera su asiento', () => {
     let t = 0;
     const rm = new RoomManager(() => t);
     const room = fourRoom(rm);
@@ -323,12 +341,31 @@ describe('RoomManager', () => {
     const g = room.game!;
     const cur = g.turn;
     rm.disconnect(room.code, cur, `s${cur}`);
-    t += 30_000;
+    expect(rm.nextCheckAt(room)).toBe(30_000);
+    t += 20_000;
     expect(rm.tick(room)).toBe(false);
-    t += 31_000;
+    expect(rm.isBotTurn(room)).toBe(false);
+    t += 11_000;
     expect(rm.tick(room)).toBe(true);
+    expect(room.seats[cur]!.replaced).toBe(true);
+    expect(rm.isBotTurn(room)).toBe(true);
+    // El bot juega su turno completo
+    let steps = 0;
+    while (rm.isBotTurn(room) && steps++ < 100) rm.botStep(room);
     expect(g.turn).toBe((cur + 1) % 3);
-    expect(g.racks[cur]).toHaveLength(15);
+    // Vuelve con su token
+    const back = rm.join(room.code, { name: 'X', avatar: '🙂' }, room.seats[cur]!.token, 'new');
+    expect(back).toMatchObject({ ok: true, seat: cur, reconnected: true });
+    expect(room.seats[cur]!.replaced).toBe(false);
+  });
+
+  it('Empezar dos veces no da error: la segunda vez entra a la partida en curso', () => {
+    const rm = new RoomManager();
+    const room = fourRoom(rm);
+    expect(rm.start(room, 0)).toEqual({ ok: true });
+    const g = room.game;
+    expect(rm.start(room, 0)).toEqual({ ok: true });
+    expect(room.game).toBe(g);
   });
 
   it('torneo al mejor de 3: marcador, campeón y nuevo torneo', () => {

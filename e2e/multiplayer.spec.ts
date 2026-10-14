@@ -211,3 +211,30 @@ test('girar el celular (vertical ↔ horizontal) no deja botones encima del atri
     await expect.poll(layoutProblems, { timeout: 5_000 }).toEqual([]);
   }
 });
+
+test('si un jugador cierra la app, a los 30 s el bot juega por él', async ({ browser }) => {
+  test.setTimeout(150_000);
+  const A = await player(browser, 'Ana', true);
+  const B = await player(browser, 'Beto', true);
+  await A.goto('/');
+  await A.click('#btn-create');
+  await expect(A.locator('#lobby')).toBeVisible();
+  const code = (await A.locator('#lobby-code').textContent())!.trim();
+  await B.goto(`/?r=${code}`);
+  await expect(A.locator('#lobby-players li:not(.empty)')).toHaveCount(2, { timeout: 30_000 });
+  await A.click('#btn-start');
+  await expect(A.locator('#hud')).toBeVisible({ timeout: 30_000 });
+  await expect(B.locator('#hud')).toBeVisible({ timeout: 30_000 });
+  const vb = (await view(B))!;
+  const bSeat = vb.you;
+  // B cierra la app de golpe (sin tocar "Salir")
+  await B.context().close();
+  await expect.poll(async () => (await view(A))!.players[bSeat]!.connected, { timeout: 15_000 }).toBe(false);
+  // A los ~30 s el bot toma su asiento
+  await expect.poll(async () => (await view(A))!.players[bSeat]!.replaced === true, { timeout: 45_000, intervals: [1000] }).toBe(true);
+  await expect(A.locator('#opps')).toContainText('bot');
+  // Si es mi turno, robo; luego el bot debe jugar su turno y devolvérmelo
+  if ((await view(A))!.turn === (await view(A))!.you) await A.click('#act-draw');
+  await expect.poll(async () => (await view(A))!.turn === (await view(A))!.you, { timeout: 25_000 }).toBe(true);
+  expect((await view(A))!.status).toBe('playing');
+});

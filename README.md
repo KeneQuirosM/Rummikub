@@ -138,9 +138,10 @@ Detalle del modelo de estado y del protocolo en [`docs/ARCHITECTURE.md`](docs/AR
   jugador en turno brilla en dorado. Las fichas jugadas por un rival vuelan desde su lado de la mesa.
 - **HUD**: una ficha compacta por rival (avatar, fichas, conexión) en el mismo orden que en la mesa; pozo, reacciones y
   chat en la columna derecha. El encuadre de la cámara reserva el espacio de esas columnas.
-- **Abandono**: si alguien toca "Salir" en plena partida, el servidor marca su asiento como `replaced` y un bot juega por él
-  (los demás lo ven con 🤖). Si vuelve con su token, recupera el asiento. Si queda un solo humano, la partida termina.
-- **Desconexión**: se le espera; sin límite de tiempo, si está desconectado más de 60 s en su turno roba automáticamente.
+- **Abandono o desconexión**: si alguien toca "Salir" en plena partida, o se desconecta (cierra la app, sin batería,
+  sin señal) y no vuelve en 30 s, el servidor marca su asiento como `replaced` y un bot juega por él (los demás lo ven
+  con 🤖). Si vuelve con su token, recupera el asiento. La partida sigue aunque quede un solo humano (contra los bots);
+  si no queda nadie conectado, los bots no juegan solos.
 - **Fin**: ranking por puntos de todos los jugadores; con el pozo agotado puede haber varios ganadores empatados.
 - **Revancha**: votan todos los humanos conectados; los que se fueron no entran. Si quedan menos de 2, la sala vuelve a la espera.
 

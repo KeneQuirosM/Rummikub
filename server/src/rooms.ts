@@ -74,8 +74,8 @@ export type JoinResult =
   | { ok: true; room: Room; seat: Seat; token: string; reconnected: boolean }
   | { ok: false; error: RoomErrorCode };
 
-/** Tiempo que se espera a un jugador desconectado en su turno si no hay límite de tiempo. */
-export const ABSENT_TURN_MS = 60_000;
+/** Si un jugador se desconecta en plena partida y no vuelve en este tiempo, el bot juega por él. */
+export const TAKEOVER_MS = 30_000;
 
 export function sanitizeName(raw: unknown): string {
   const s = typeof raw === 'string' ? raw : '';
@@ -189,7 +189,9 @@ export class RoomManager {
 
   /** El anfitrión (o cualquiera si el anfitrión no está) empieza la partida con 2 a 4 jugadores. */
   start(room: Room, seat: Seat): { ok: true } | { ok: false; error: RoomErrorCode } {
-    if (room.game) return { ok: false, error: 'GAME_IN_PROGRESS' };
+    // Idempotente: si la partida ya empezó (doble toque, o un cliente que se quedó en la sala de espera),
+    // responder ok para que el cliente entre a la partida en curso en vez de quedarse atascado.
+    if (room.game) return { ok: true };
     const hostAway = !room.seats[room.host]?.socketId;
     if (seat !== room.host && !hostAway) return { ok: false, error: 'NOT_HOST' };
     if (room.seats.length < MIN_PLAYERS) return { ok: false, error: 'NOT_ENOUGH_PLAYERS' };
@@ -262,11 +264,8 @@ export class RoomManager {
     }
     s.socketId = null;
     s.disconnectedAt = this.now();
+    // El bot juega por él (también si queda un solo humano: puede terminar la partida contra el bot)
     s.replaced = true;
-    if (room.game.status === 'playing' && this.humans(room) <= 1) {
-      forceFinish(room.game);
-      this.countResult(room);
-    }
     if (room.game.status === 'ended') this.checkRematch(room);
     if (room.seats.every((x) => !x.socketId)) {
       this.rooms.delete(code);
@@ -290,21 +289,44 @@ export class RoomManager {
   tick(room: Room): boolean {
     const g = room.game;
     if (!g || g.status !== 'playing') return false;
-    let changed = checkTimeout(g, this.now());
-    if (!changed && g.turnDeadline === null) {
-      const s = room.seats[g.turn];
-      if (s && !s.replaced && !s.socketId && s.disconnectedAt !== null && this.now() - s.disconnectedAt > ABSENT_TURN_MS) {
-        changed = forceDraw(g, this.now());
+    const tookOver = this.takeoverAbsent(room);
+    const changed = checkTimeout(g, this.now());
+    if (changed) this.countResult(room);
+    return changed || tookOver;
+  }
+
+  /**
+   * Quien lleva más de TAKEOVER_MS desconectado en plena partida pasa a ser jugado por el bot
+   * (si vuelve con su token, recupera el asiento). Devuelve true si cambió algo.
+   */
+  takeoverAbsent(room: Room): boolean {
+    const g = room.game;
+    if (!g || g.status !== 'playing') return false;
+    let changed = false;
+    for (const s of room.seats) {
+      if (!s.replaced && !s.socketId && s.disconnectedAt !== null && this.now() - s.disconnectedAt >= TAKEOVER_MS) {
+        s.replaced = true;
+        changed = true;
       }
     }
-    if (changed) this.countResult(room);
     return changed;
+  }
+
+  /** Próximo momento en que hay que revisar la sala (fin de turno o relevo de un ausente). */
+  nextCheckAt(room: Room): number | null {
+    const g = room.game;
+    if (!g || g.status !== 'playing') return null;
+    const times: number[] = [];
+    if (g.turnDeadline !== null) times.push(g.turnDeadline);
+    for (const s of room.seats) if (!s.replaced && !s.socketId && s.disconnectedAt !== null) times.push(s.disconnectedAt + TAKEOVER_MS);
+    return times.length ? Math.min(...times) : null;
   }
 
   /** ¿Le toca al bot sustituto? */
   isBotTurn(room: Room): boolean {
     const g = room.game;
-    return !!g && g.status === 'playing' && !!room.seats[g.turn]?.replaced;
+    // Solo si queda alguien conectado mirando (no tiene sentido que los bots jueguen solos)
+    return !!g && g.status === 'playing' && !!room.seats[g.turn]?.replaced && room.seats.some((s) => s.socketId);
   }
 
   /**

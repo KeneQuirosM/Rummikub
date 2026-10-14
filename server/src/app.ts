@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import { extname, join, normalize, resolve } from 'node:path';
 import { Server, type Socket } from 'socket.io';
 import type { ClientToServerEvents, Seat, ServerToClientEvents } from '@rummi/shared';
-import { ABSENT_TURN_MS, isEmote, RoomManager, sanitizeChat, type Room } from './rooms.js';
+import { isEmote, RoomManager, sanitizeChat, type Room } from './rooms.js';
 
 export interface AppOptions {
   port?: number;
@@ -143,12 +143,8 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
     const prev = timers.get(room.code);
     if (prev) clearTimeout(prev);
     timers.delete(room.code);
-    const g = room.game;
-    if (!g || g.status !== 'playing') return;
-    let at = g.turnDeadline;
-    // Sin límite de tiempo: si el jugador en turno está desconectado, no esperarlo para siempre
-    const cur = room.seats[g.turn];
-    if (at === null && cur && !cur.replaced && !cur.socketId && cur.disconnectedAt !== null) at = cur.disconnectedAt + ABSENT_TURN_MS;
+    // Fin de turno o relevo de un jugador desconectado por el bot
+    const at = rooms.nextCheckAt(room);
     if (at === null) return;
     const ms = Math.max(0, at - now()) + 20;
     timers.set(

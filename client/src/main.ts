@@ -189,7 +189,20 @@ function showLobby(code: string, tr: SocketTransport) {
     startBtn.disabled = true;
     const r = await tr.start();
     startBtn.disabled = false;
-    if (!r.ok) toast(t(`err.${r.error}`), 'error');
+    if (!r.ok) {
+      toast(t(`err.${r.error}`), 'error');
+      return;
+    }
+    // Si la partida ya estaba en curso y seguimos en la sala de espera, entrar a ella
+    setTimeout(() => {
+      const v = tr.lastState;
+      if (!session && !$('lobby').hidden && v && v.status !== 'waiting') {
+        off();
+        offClosed();
+        pendingSocket = null;
+        void startGame(tr, v);
+      }
+    }, 600);
   };
   const render = (v: PlayerView) => renderLobby(v);
   $('lobby-mode').onclick = async (e) => {
