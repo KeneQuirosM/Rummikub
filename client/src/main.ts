@@ -4,6 +4,7 @@ import { unlockAudio } from './audio';
 import { applyI18n, setLang, t } from './i18n';
 import type { Transport } from './net/transport';
 import { getSessionToken, onSettingsChange, profile, settings, updateSettings } from './settings';
+import { accountReady, accountState, initAccount, onAccountChange } from './account';
 import { GameStatsTracker } from './stats';
 import { $, banner, closeAllModals, confirmDialog, escapeHtml, modal, show, toast } from './ui/dom';
 import { openHowTo, openJoin, openProfile, openSettings } from './ui/menus';
@@ -48,6 +49,9 @@ async function boot() {
   unlockAudio();
   setupConnectivityBanner();
   registerServiceWorker();
+  // Cuentas (opcionales): en segundo plano, sin frenar la carga
+  onAccountChange(() => refreshProfileChip());
+  void initAccount();
 
   const [engineMod, homeMod] = await Promise.all([
     import('./three/engine').then((m) => (progress(0.6), m)),
@@ -89,6 +93,8 @@ async function boot() {
 function refreshProfileChip() {
   $('menu-avatar').textContent = profile.avatar;
   $('menu-name').textContent = profile.name;
+  const u = accountState().user;
+  $('profile-chip').classList.toggle('linked', !!u && !u.anonymous);
 }
 
 function showMenu() {
@@ -136,6 +142,7 @@ async function connect(): Promise<SocketTransport | null> {
     return null;
   }
   const { SocketTransport } = await import('./net/socket');
+  await accountReady(); // para que el servidor sepa de quién es cada resultado
   try {
     return await SocketTransport.connect();
   } catch {

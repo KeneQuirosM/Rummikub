@@ -20,12 +20,14 @@ export default defineConfig({
     host: true,
     proxy: {
       '/socket.io': { target: `http://localhost:${serverPort}`, ws: true, changeOrigin: true },
+      '/config.json': { target: `http://localhost:${serverPort}`, changeOrigin: true },
     },
   },
   preview: {
     port: 4173,
     proxy: {
       '/socket.io': { target: `http://localhost:${serverPort}`, ws: true, changeOrigin: true },
+      '/config.json': { target: `http://localhost:${serverPort}`, changeOrigin: true },
     },
   },
   build: {

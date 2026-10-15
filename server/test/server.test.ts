@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { io as ioc, type Socket } from 'socket.io-client';
 import type { Ack, ClientToServerEvents, PlayerView, RoomJoined, ServerToClientEvents } from '@rummi/shared';
 import { createApp, type App } from '../src/app.js';
+import type { Accounts, ResultRow } from '../src/accounts.js';
 import { RoomManager, sanitizeChat, sanitizeName } from '../src/rooms.js';
 
 type C = Socket<ServerToClientEvents, ClientToServerEvents>;
@@ -408,5 +409,69 @@ describe('RoomManager', () => {
     rm.join(room.code, { name: 'B', avatar: '🐼' }, undefined, 's1');
     rm.start(room, 0);
     expect(rm.view(room, 0)).toMatchObject({ bestOf: 1, match: null });
+  });
+});
+
+describe('cuentas', () => {
+  it('al terminar se anotan los resultados de quienes tienen cuenta (no de quien abandonó)', () => {
+    let t = 1_000;
+    const rm = new RoomManager(() => t);
+    const rows: ResultRow[][] = [];
+    rm.onResults = (r) => rows.push(r);
+    const { room } = rm.create({ name: 'Ana', avatar: '🦊' }, { bestOf: 3 }, 's0');
+    rm.join(room.code, { name: 'Beto', avatar: '🐼' }, undefined, 's1');
+    rm.join(room.code, { name: 'Caro', avatar: '🐯' }, undefined, 's2');
+    room.seats[0]!.userId = '11111111-1111-1111-1111-111111111111';
+    room.seats[2]!.userId = '33333333-3333-3333-3333-333333333333';
+    rm.start(room, 0);
+    room.seats[2]!.replaced = true; // Caro se fue: el bot terminó por ella
+    const g = room.game!;
+    // Mejor jugada: se cuenta desde los eventos del motor
+    g.lastEvent = { type: 'play', player: 0, seq: ++g.eventSeq, tiles: [1, 2, 3, 4] };
+    (rm as unknown as { countResult(r: typeof room): void }).countResult(room);
+    t += 95_000;
+    g.status = 'ended';
+    g.result = { winners: [0], reason: 'out', points: [0, 12, 30] };
+    (rm as unknown as { countResult(r: typeof room): void }).countResult(room);
+    (rm as unknown as { countResult(r: typeof room): void }).countResult(room); // solo una vez
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual([
+      {
+        user_id: '11111111-1111-1111-1111-111111111111', mode: 'online', level: null, place: 1, players: 3, won: true, points: 0,
+        rivals: [{ name: 'Beto', avatar: '🐼' }, { name: 'Caro', avatar: '🐯' }],
+        duration_sec: 95, best_play: 4, champion: false, best_of: 3,
+      },
+    ]);
+  });
+
+  it('el token del handshake vincula la cuenta al asiento y /config.json la publica', async () => {
+    const recorded: ResultRow[][] = [];
+    const accounts: Accounts = {
+      publicConfig: { url: 'https://x.supabase.co', anonKey: 'anon' },
+      verify: async (tok) => (tok === 'good' ? '22222222-2222-2222-2222-222222222222' : null),
+      record: (r) => recorded.push(r),
+    };
+    const a2 = await createApp({ port: 0, accounts });
+    try {
+      const u = `http://localhost:${a2.port}`;
+      expect(await (await fetch(`${u}/config.json`)).json()).toEqual({ supabase: { url: 'https://x.supabase.co', anonKey: 'anon' } });
+      const mk = (accessToken?: string) =>
+        new Promise<C>((res) => {
+          const c: C = ioc(u, { transports: ['websocket'], forceNew: true, reconnection: false, auth: accessToken ? { accessToken } : {} });
+          clients.push(c);
+          c.on('connect', () => res(c));
+        });
+      const a = await mk('good');
+      const b = await mk('bad');
+      const ra = await create(a);
+      if (!ra.ok) throw new Error('create');
+      expect((await join(b, ra.code)).ok).toBe(true);
+      const room = a2.rooms.rooms.get(ra.code)!;
+      expect(room.seats.map((s) => s.userId)).toEqual(['22222222-2222-2222-2222-222222222222', null]);
+    } finally {
+      await a2.close();
+    }
+    // sin cuentas: configuración vacía
+    expect(await (await fetch(`${url}/config.json`)).json()).toEqual({});
   });
 });

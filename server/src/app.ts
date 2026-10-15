@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server as HttpServer, type Ser
 import { extname, join, normalize, resolve } from 'node:path';
 import { Server, type Socket } from 'socket.io';
 import type { ClientToServerEvents, Seat, ServerToClientEvents } from '@rummi/shared';
+import type { Accounts } from './accounts.js';
 import { isEmote, RoomManager, sanitizeChat, type Room } from './rooms.js';
 
 export interface AppOptions {
@@ -13,12 +14,16 @@ export interface AppOptions {
   staticDir?: string | null;
   now?: () => number;
   log?: (...a: unknown[]) => void;
+  /** Cuentas (Supabase). null = sin cuentas. */
+  accounts?: Accounts | null;
 }
 
 interface SocketData {
   code?: string;
   /** Token del asiento (los índices pueden cambiar en una revancha). */
   token?: string;
+  /** Usuario verificado con el token de acceso del handshake (null = sin cuenta). */
+  userId?: string | null;
   buckets: Record<string, { tokens: number; at: number }>;
 }
 
@@ -90,12 +95,20 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
   const now = opts.now ?? Date.now;
   const log = opts.log ?? (() => {});
   const rooms = new RoomManager(now);
+  const accounts = opts.accounts ?? null;
+  if (accounts) rooms.onResults = (rows) => accounts.record(rows);
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
   const http = createServer((req, res) => {
     if (req.url === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, rooms: rooms.rooms.size }));
+      return;
+    }
+    // Configuración pública para el cliente (las cuentas son opcionales)
+    if (req.url === '/config.json') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify(accounts ? { supabase: accounts.publicConfig } : {}));
       return;
     }
     if (opts.staticDir && req.method === 'GET' && serveStatic(opts.staticDir, req, res)) return;
@@ -184,6 +197,25 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
     }
   };
 
+  // Identificar la cuenta con el token del handshake (si no hay o no es válido, se juega sin cuenta)
+  io.use((socket, next) => {
+    const tok = (socket.handshake.auth as { accessToken?: unknown } | undefined)?.accessToken;
+    if (!accounts || typeof tok !== 'string') {
+      socket.data.userId = null;
+      return next();
+    }
+    accounts
+      .verify(tok)
+      .then((id) => {
+        socket.data.userId = id;
+        next();
+      })
+      .catch(() => {
+        socket.data.userId = null;
+        next();
+      });
+  });
+
   io.on('connection', (socket: S) => {
     socket.data.buckets = {};
 
@@ -191,6 +223,7 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
       if (typeof ack !== 'function') return;
       if (!allow(socket, 'room', now())) return ack({ ok: false, error: 'RATE_LIMITED' });
       const { room, seat, token } = rooms.create(p ?? {}, p?.settings, socket.id);
+      room.seats[seat]!.userId = socket.data.userId ?? null;
       attach(socket, room, token);
       log(`[room ${room.code}] creada`);
       ack({ ok: true, code: room.code, token, seat });
@@ -207,6 +240,10 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
       })();
       const r = rooms.join(p?.code, p ?? {}, p?.token, socket.id);
       if (!r.ok) return ack(r);
+      // Vincular la cuenta (al reconectar sin token válido se conserva la anterior)
+      const st = r.room.seats[r.seat]!;
+      if (socket.data.userId) st.userId = socket.data.userId;
+      else if (!r.reconnected) st.userId = null;
       // Expulsar la conexión anterior del mismo asiento (otra pestaña / socket zombie)
       if (prevSocket && prevSocket !== socket.id) io.sockets.sockets.get(prevSocket)?.disconnect(true);
       attach(socket, r.room, r.token);

@@ -1,5 +1,6 @@
 /**
- * Historial y estadísticas guardados en el teléfono (localStorage). Sin cuentas ni servidor.
+ * Historial y estadísticas. Siempre se guardan en el teléfono (localStorage); con cuenta,
+ * además se leen desde la nube (ver account.ts) y `currentStats()` devuelve esas.
  */
 import type { PlayerView } from '@rummi/shared';
 
@@ -36,7 +37,7 @@ export interface ModeTotals {
   tourneys: number;
 }
 
-interface StatsData {
+export interface StatsData {
   v: 1;
   records: GameRecord[];
   totals: Record<GameMode, ModeTotals>;
@@ -50,14 +51,11 @@ const emptyTotals = (): ModeTotals => ({ played: 0, won: 0, streak: 0, bestStrea
 export function loadStats(): StatsData {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) {
-      const d = JSON.parse(raw) as StatsData;
-      if (d?.v === 1 && Array.isArray(d.records)) return { ...d, totals: { online: { ...emptyTotals(), ...d.totals?.online }, bot: { ...emptyTotals(), ...d.totals?.bot } } };
-    }
+    if (raw) return normalizeStats(JSON.parse(raw));
   } catch {
     /* datos corruptos o almacenamiento no disponible */
   }
-  return { v: 1, records: [], totals: { online: emptyTotals(), bot: emptyTotals() } };
+  return emptyStats();
 }
 
 function saveStats(d: StatsData) {
@@ -68,8 +66,38 @@ function saveStats(d: StatsData) {
   }
 }
 
-export function addRecord(r: GameRecord): void {
-  const d = loadStats();
+/** Fuente alternativa (la cuenta en la nube). Si devuelve null se usan las del teléfono. */
+let remoteSource: (() => StatsData | null) | null = null;
+const recordListeners = new Set<(r: GameRecord) => void>();
+
+export function setRemoteStatsSource(f: (() => StatsData | null) | null): void {
+  remoteSource = f;
+}
+
+/** Avisa de cada partida registrada (la cuenta la sube a la nube). */
+export function onRecord(f: (r: GameRecord) => void): () => void {
+  recordListeners.add(f);
+  return () => recordListeners.delete(f);
+}
+
+/** Estadísticas a mostrar: las de la cuenta si hay, si no las del teléfono. */
+export function currentStats(): StatsData {
+  return remoteSource?.() ?? loadStats();
+}
+
+export function emptyStats(): StatsData {
+  return { v: 1, records: [], totals: { online: emptyTotals(), bot: emptyTotals() } };
+}
+
+/** Normaliza datos de origen desconocido (localStorage o la nube). */
+export function normalizeStats(d: unknown): StatsData {
+  const x = d as Partial<StatsData> | null;
+  if (x?.v !== 1 || !Array.isArray(x.records)) return emptyStats();
+  return { v: 1, records: x.records.slice(0, MAX_RECORDS), totals: { online: { ...emptyTotals(), ...x.totals?.online }, bot: { ...emptyTotals(), ...x.totals?.bot } } };
+}
+
+/** Suma una partida a unas estadísticas (sin guardar). */
+export function applyRecord(d: StatsData, r: GameRecord): void {
   d.records.unshift(r);
   d.records = d.records.slice(0, MAX_RECORDS);
   const t = d.totals[r.mode];
@@ -82,7 +110,13 @@ export function addRecord(r: GameRecord): void {
   } else t.streak = 0;
   t.bestPlay = Math.max(t.bestPlay, r.bestPlay);
   if (r.champion) t.tourneys++;
+}
+
+export function addRecord(r: GameRecord): void {
+  const d = loadStats();
+  applyRecord(d, r);
   saveStats(d);
+  recordListeners.forEach((f) => f(r));
 }
 
 /** Suma de dos totales (para la vista "Todas"). La racha actual es la de la última partida jugada. */

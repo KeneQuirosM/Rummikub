@@ -9,6 +9,7 @@ import type {
   RoomSettings,
   ServerToClientEvents,
 } from '@rummi/shared';
+import { accessToken } from '../account';
 import { profile, setSessionToken } from '../settings';
 import { Emitter, type Transport, type TransportEvents } from './transport';
 
@@ -60,6 +61,11 @@ export class SocketTransport implements Transport {
         reconnectionDelay: 500,
         reconnectionDelayMax: 4000,
         timeout: timeoutMs,
+        // Cuenta (si hay): se envía en cada (re)conexión para que el servidor anote los resultados
+        auth: (cb) => {
+          const tok = accessToken();
+          cb(tok ? { accessToken: tok } : {});
+        },
       });
       const fail = () => {
         cleanup();

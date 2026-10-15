@@ -223,8 +223,28 @@ Health check: `/healthz`.
 | `VITE_SERVER_URL` | cliente (build) | *(mismo origen)* | URL del servidor Socket.IO si el cliente está en otro dominio |
 | `SERVER_PORT` | Vite dev | `3001` | Puerto al que apunta el proxy de desarrollo |
 | `E2E_PORT` | Playwright | `4321` | Puerto del servidor en los tests e2e |
+| `SUPABASE_URL` | servidor | *(vacío = sin cuentas)* | URL del proyecto Supabase (activa las cuentas) |
+| `SUPABASE_ANON_KEY` | servidor | – | Llave pública (anon/publishable); se entrega al cliente en `/config.json` |
+| `SUPABASE_SERVICE_ROLE_KEY` | servidor | – | Llave **secreta** (service_role); solo el servidor la usa para anotar partidas online. Nunca en el cliente |
 
 Ver `.env.example`.
+
+### Cuentas (opcional, con Supabase)
+
+Sin las variables `SUPABASE_*` el juego funciona igual que siempre (estadísticas solo en el teléfono). Con ellas:
+
+- **Cuenta anónima automática** al abrir el juego: nadie tiene que registrarse para empezar.
+- En **Tu perfil → Guarda tu progreso**: *Continuar con Google* o *enlace por correo*. Se **vincula** a la cuenta anónima, así no se pierde nada; en otro dispositivo, el mismo Google/correo recupera la cuenta (nombre, avatar, estadísticas y temas desbloqueados).
+- **Partidas online**: las anota el **servidor** (verifica el token de cada jugador al conectar y escribe con la llave secreta), así que nadie puede inventarse victorias. Quien abandona y es reemplazado por el bot no suma ni resta.
+- **Práctica contra bots**: corre en el teléfono, así que la anota el propio cliente (la base de datos solo le permite insertar partidas de práctica propias).
+- Las estadísticas que ya había en el teléfono se suben **una sola vez** por cuenta (`legacy_stats`).
+
+Configuración (una vez):
+1. Crear un proyecto en [supabase.com](https://supabase.com) y ejecutar [`supabase/schema.sql`](supabase/schema.sql) en *SQL Editor*.
+2. *Authentication → Sign In / Providers*: activar **Allow anonymous sign-ins**, **Allow manual linking**, **Email** y **Google** (Client ID/Secret de Google Cloud; en Google Cloud, URI de redirección autorizada `https://<proyecto>.supabase.co/auth/v1/callback`).
+3. *Authentication → URL Configuration*: *Site URL* = la URL del juego (p. ej. `https://rummi3d.onrender.com`) y añadirla también en *Redirect URLs* (`https://rummi3d.onrender.com/**`).
+4. En Render: `SUPABASE_URL`, `SUPABASE_ANON_KEY` y `SUPABASE_SERVICE_ROLE_KEY`.
+5. Recomendado: SMTP propio (p. ej. Resend) en *Authentication → Emails*; el correo integrado de Supabase solo envía unos pocos enlaces por hora.
 
 ---
 

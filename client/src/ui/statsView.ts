@@ -1,5 +1,6 @@
 import { getLang, t } from '../i18n';
-import { clearStats, combinedTotals, loadStats, type GameRecord, type ModeTotals } from '../stats';
+import { accountState, onAccountChange, refreshStats } from '../account';
+import { clearStats, combinedTotals, currentStats, type GameRecord, type ModeTotals } from '../stats';
 import { confirmDialog, escapeHtml, modal } from './dom';
 
 type Tab = 'all' | 'online' | 'bot';
@@ -51,7 +52,9 @@ function history(records: GameRecord[]): string {
 export function openStats() {
   let tab: Tab = 'all';
   const render = () => {
-    const d = loadStats();
+    const d = currentStats();
+    const u = accountState().user;
+    const inCloud = !!u && accountState().enabled;
     const totals = tab === 'all' ? combinedTotals(d) : d.totals[tab];
     const recs = tab === 'all' ? d.records : d.records.filter((r) => r.mode === tab);
     return `
@@ -63,12 +66,16 @@ export function openStats() {
       <h3 class="stats-sub">${t('stats.history')}</h3>
       ${history(recs)}
       <div class="actions-row">
-        <button class="btn btn-ghost" id="st-clear">${t('stats.clear')}</button>
+        ${inCloud ? '' : `<button class="btn btn-ghost" id="st-clear">${t('stats.clear')}</button>`}
         <button class="btn btn-gold" data-close>${t('common.close')}</button>
       </div>
-      <p class="muted" style="font-size:12px;text-align:center;margin:10px 0 0">${t('stats.local')}</p>`;
+      <p class="muted" style="font-size:12px;text-align:center;margin:10px 0 0">${t(inCloud ? 'stats.cloud' : 'stats.local')}</p>`;
   };
-  const m = modal(render(), { className: 'stats-modal' });
+  let off: () => void = () => {};
+  const m = modal(render(), { className: 'stats-modal', onClose: () => off() });
+  // Con cuenta: traer lo último de la nube y redibujar
+  off = onAccountChange(() => (m.el.innerHTML = render()));
+  void refreshStats();
   m.el.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement;
     const b = target.closest<HTMLButtonElement>('.stats-tabs button[data-v]');

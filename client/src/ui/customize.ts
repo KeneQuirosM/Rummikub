@@ -1,12 +1,12 @@
 import { t } from '../i18n';
 import { settings, updateSettings } from '../settings';
-import { combinedTotals, loadStats } from '../stats';
+import { combinedTotals, currentStats } from '../stats';
 import { BACK_THEMES, TABLE_THEMES } from '../three/themes';
 import { modal, toast } from './dom';
 
 /** Personalizar mesa y dorsos. Algunos temas se desbloquean con victorias. */
 export function openCustomize() {
-  const wins = combinedTotals(loadStats()).won;
+  const wins = combinedTotals(currentStats()).won;
   const swatch = (kind: 'table' | 'back', id: string, color: string, need: number, selected: boolean) => {
     const locked = wins < need;
     const name = t(`theme.${kind}.${id}`);

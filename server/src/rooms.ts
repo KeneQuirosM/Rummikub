@@ -3,6 +3,7 @@
  * guarda el estado completo de la partida y solo publica vistas filtradas.
  */
 import { randomUUID } from 'node:crypto';
+import type { ResultRow } from './accounts.js';
 import {
   ALLOWED_TURN_SECONDS,
   applyIntent,
@@ -48,6 +49,8 @@ export interface SeatInfo {
   replaced: boolean;
   /** Momento en que se desconectó (null si está conectado). */
   disconnectedAt: number | null;
+  /** Cuenta verificada del jugador (null = sin cuenta). */
+  userId: string | null;
 }
 
 export interface Room {
@@ -68,6 +71,12 @@ export interface Room {
   botPlan: { key: string; moves: BotMove[]; play: boolean } | null;
   /** Torneo en curso: victorias por token de asiento (sobrevive a reordenamientos). */
   match: { bestOf: number; game: number; winsByToken: Record<string, number>; champions: string[] | null } | null;
+  /** Inicio de la partida actual (para la duración en las estadísticas). */
+  gameStartedAt: number;
+  /** Más fichas colocadas en un turno, por asiento (partida actual). */
+  bestPlay: number[];
+  /** Último evento de juego ya contado en bestPlay. */
+  seenEventSeq: number;
 }
 
 export type JoinResult =
@@ -113,6 +122,9 @@ export function isEmote(raw: unknown): raw is string {
 export class RoomManager {
   readonly rooms = new Map<string, Room>();
 
+  /** Se llama una vez por partida terminada con los resultados de los jugadores con cuenta. */
+  onResults: ((rows: ResultRow[]) => void) | null = null;
+
   constructor(private now: () => number = Date.now, private rand: () => number = Math.random) {}
 
   private newCode(): string {
@@ -133,6 +145,7 @@ export class RoomManager {
       wins: 0,
       replaced: false,
       disconnectedAt: null,
+      userId: null,
     };
   }
 
@@ -156,6 +169,9 @@ export class RoomManager {
       counted: false,
       botPlan: null,
       match: null,
+      gameStartedAt: 0,
+      bestPlay: [],
+      seenEventSeq: 0,
     };
     this.rooms.set(code, room);
     return { room, seat: 0, token: seat.token };
@@ -224,6 +240,9 @@ export class RoomManager {
     room.counted = false;
     room.botPlan = null;
     room.gamesPlayed++;
+    room.gameStartedAt = this.now();
+    room.bestPlay = new Array<number>(n).fill(0);
+    room.seenEventSeq = room.game.eventSeq;
   }
 
   /** Humanos que siguen en la partida (no reemplazados por el bot). */
@@ -359,7 +378,14 @@ export class RoomManager {
 
   private countResult(room: Room) {
     const g = room.game;
-    if (!g || g.status !== 'ended' || room.counted) return;
+    if (!g) return;
+    // Mejor jugada de cada asiento (más fichas en un turno)
+    if (g.eventSeq !== room.seenEventSeq) {
+      room.seenEventSeq = g.eventSeq;
+      const e = g.lastEvent;
+      if (e?.type === 'play') room.bestPlay[e.player] = Math.max(room.bestPlay[e.player] ?? 0, e.tiles.length);
+    }
+    if (g.status !== 'ended' || room.counted) return;
     room.counted = true;
     for (const w of g.result?.winners ?? []) {
       const s = room.seats[w];
@@ -374,6 +400,42 @@ export class RoomManager {
       const champs = Object.entries(m.winsByToken).filter(([, w]) => w >= need).map(([tok]) => tok);
       if (champs.length) m.champions = champs;
     }
+    if (this.onResults) {
+      const rows = this.resultRows(room);
+      if (rows.length) this.onResults(rows);
+    }
+  }
+
+  /** Resultados para las cuentas: uno por jugador con cuenta que terminó la partida. */
+  resultRows(room: Room): ResultRow[] {
+    const g = room.game;
+    const r = g?.result;
+    if (!g || !r) return [];
+    const m = room.match;
+    const duration = Math.max(0, Math.round((this.now() - room.gameStartedAt) / 1000));
+    const rows: ResultRow[] = [];
+    room.seats.forEach((s, i) => {
+      // Quien abandonó (y jugó el bot por él) no suma ni resta
+      if (!s.userId || s.replaced) return;
+      const pts = r.points[i] ?? 0;
+      const won = r.winners.includes(i);
+      const place = won ? 1 : 1 + r.points.filter((p, j) => j !== i && (p < pts || r.winners.includes(j))).length;
+      rows.push({
+        user_id: s.userId,
+        mode: 'online',
+        level: null,
+        place,
+        players: room.seats.length,
+        won,
+        points: pts,
+        rivals: room.seats.filter((_, j) => j !== i).map((x) => ({ name: x.name, avatar: x.avatar })),
+        duration_sec: duration,
+        best_play: room.bestPlay[i] ?? 0,
+        champion: !!m?.champions?.includes(s.token),
+        best_of: m?.bestOf ?? 1,
+      });
+    });
+    return rows;
   }
 
   /** Jugadores que cuentan para la revancha: humanos conectados. */
