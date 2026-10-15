@@ -36,6 +36,7 @@
 
     <!-- MENÚ PRINCIPAL -->
     <section id="menu" class="screen" hidden>
+      <button id="friends-chip" class="friends-chip" hidden><span class="ico">👥</span><span data-i18n="friends.title"></span><i class="dot-badge" id="friends-badge" hidden></i></button>
       <button id="profile-chip" class="profile-chip" data-i18n-title="menu.editProfile">
         <span class="avatar" id="menu-avatar">🦊</span><span id="menu-name">Jugador</span>
       </button>
@@ -68,6 +69,7 @@
         </div>
         <p class="waiting"><span class="dots"></span> <span id="lobby-status" data-i18n="room.waiting"></span></p>
         <button class="btn btn-gold btn-lg" id="btn-start" hidden></button>
+        <button class="btn btn-gold btn-lg" id="btn-invite-friends" hidden><span class="ico">👥</span><span data-i18n="friends.inviteFriends"></span></button>
         <button class="btn btn-whatsapp btn-lg" id="btn-share"><span class="ico">💬</span><span data-i18n="room.share"></span></button>
         <button class="btn" id="btn-copy"><span class="ico">🔗</span><span data-i18n="room.copy"></span></button>
         <button class="btn btn-ghost" id="btn-lobby-leave" data-i18n="room.leave"></button>

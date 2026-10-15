@@ -41,7 +41,10 @@ export type RoomErrorCode =
   | 'RATE_LIMITED'
   | 'GAME_IN_PROGRESS'
   | 'NOT_HOST'
-  | 'NOT_ENOUGH_PLAYERS';
+  | 'NOT_ENOUGH_PLAYERS'
+  | 'NOT_FRIENDS'
+  | 'OFFLINE'
+  | 'NO_ACCOUNT';
 
 export interface PublicPlayer {
   name: string;
@@ -196,6 +199,21 @@ export interface ClientToServerEvents {
   drag: (d: DragPayload) => void;
   emote: (e: string) => void;
   chat: (text: string) => void;
+  /** ¿Quiénes de estas cuentas están conectados (y quiénes en partida)? */
+  'presence:query': (ids: string[], ack: (r: PresenceInfo) => void) => void;
+  /** Invitar a un amigo a mi sala (debe estar conectado). */
+  'invite:send': (p: { to: string; code: string }, ack: (r: Ack) => void) => void;
+}
+
+export interface PresenceInfo {
+  online: string[];
+  playing: string[];
+}
+
+/** Invitación de un amigo a su sala. */
+export interface InvitePayload {
+  from: { id: string; name: string; avatar: string };
+  code: string;
 }
 
 export interface ServerToClientEvents {
@@ -204,6 +222,7 @@ export interface ServerToClientEvents {
   emote: (e: { from: number; emoji: string }) => void;
   chat: (m: ChatMessage) => void;
   'room:closed': () => void;
+  invite: (p: InvitePayload) => void;
 }
 
 export const MIN_PLAYERS = 2;

@@ -15,11 +15,13 @@ export interface ResultRow {
   players: number;
   won: boolean;
   points: number;
-  rivals: { name: string; avatar: string }[];
+  rivals: { name: string; avatar: string; user_id?: string; points?: number; place?: number; won?: boolean; bot?: boolean }[];
   duration_sec: number;
   best_play: number;
   champion: boolean;
   best_of: number;
+  game_id?: string | null;
+  draws?: number;
 }
 
 export interface Accounts {
@@ -29,6 +31,8 @@ export interface Accounts {
   verify(accessToken: string): Promise<string | null>;
   /** Guarda resultados (sin esperar; los errores solo se registran). */
   record(rows: ResultRow[]): void;
+  /** ¿Son amigos? (para permitir invitaciones directas) */
+  areFriends(a: string, b: string): Promise<boolean>;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -84,6 +88,19 @@ export function supabaseAccounts(env: NodeJS.ProcessEnv, log: (...a: unknown[]) 
           if (!res.ok) log('[accounts] error guardando resultados', res.status, (await res.text()).slice(0, 300));
         })
         .catch((e: Error) => log('[accounts] error guardando resultados', e.message));
+    },
+    async areFriends(a, b) {
+      if (!UUID.test(a) || !UUID.test(b)) return false;
+      try {
+        const res = await fetch(`${url}/rest/v1/friendships?select=user_id&user_id=eq.${a}&friend_id=eq.${b}&limit=1`, {
+          headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+          signal: AbortSignal.timeout(5000),
+        });
+        return res.ok && ((await res.json()) as unknown[]).length > 0;
+      } catch (e) {
+        log('[accounts] no se pudo comprobar la amistad', (e as Error).message);
+        return false;
+      }
     },
   };
 }

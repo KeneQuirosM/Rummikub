@@ -239,8 +239,15 @@ Sin las variables `SUPABASE_*` el juego funciona igual que siempre (estadística
 - **Práctica contra bots**: corre en el teléfono, así que la anota el propio cliente (la base de datos solo le permite insertar partidas de práctica propias).
 - Las estadísticas que ya había en el teléfono se suben **una sola vez** por cuenta (`legacy_stats`).
 
+Con cuentas también hay:
+
+- **Amigos**: cada cuenta tiene un **código de amigo** de 6 letras (Amigos → Agregar). También se puede agregar desde el historial a quien jugó contigo una partida online. La lista muestra quién está **en línea** o **en partida** (lo informa el servidor del juego) y permite **invitar a tu sala** con un toque; el invitado recibe un aviso con "Unirme".
+- **Ranking entre amigos**: victorias online (las anota el servidor) y el cara a cara de las partidas que jugaron juntos. Se calcula en la base de datos (`friends_leaderboard`) para que nadie lea resultados ajenos.
+- **Logros** (15) calculados desde el historial (`shared/src/achievements.ts`): primera victoria, rachas, 10 fichas en un turno, ganar sin robar, victoria relámpago, mesa llena, torneo, bot difícil… Varios temas de mesa y dorsos se desbloquean con logros.
+- **Historial detallado**: toca una partida para ver rivales con su puesto y puntos, duración, mejor jugada y fichas robadas.
+
 Configuración (una vez):
-1. Crear un proyecto en [supabase.com](https://supabase.com) y ejecutar [`supabase/schema.sql`](supabase/schema.sql) en *SQL Editor*.
+1. Crear un proyecto en [supabase.com](https://supabase.com) y ejecutar [`supabase/schema.sql`](supabase/schema.sql) en *SQL Editor*. El archivo se puede ejecutar de nuevo sin problema: hazlo cada vez que cambie (añade columnas y funciones nuevas sin borrar datos). Sus reglas de seguridad y funciones se prueban contra Postgres real con PGlite (`server/test/schema.test.ts`).
 2. *Authentication → Sign In / Providers*: activar **Allow anonymous sign-ins**, **Allow manual linking**, **Email** y **Google** (Client ID/Secret de Google Cloud; en Google Cloud, URI de redirección autorizada `https://<proyecto>.supabase.co/auth/v1/callback`).
 3. *Authentication → URL Configuration*: *Site URL* = la URL del juego (p. ej. `https://rummi3d.onrender.com`) y añadirla también en *Redirect URLs* (`https://rummi3d.onrender.com/**`).
 4. En Render: `SUPABASE_URL`, `SUPABASE_ANON_KEY` y `SUPABASE_SERVICE_ROLE_KEY`.

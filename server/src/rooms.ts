@@ -75,6 +75,10 @@ export interface Room {
   gameStartedAt: number;
   /** Más fichas colocadas en un turno, por asiento (partida actual). */
   bestPlay: number[];
+  /** Fichas robadas por asiento (partida actual). */
+  draws: number[];
+  /** Identificador de la partida actual (une los resultados de todos los jugadores). */
+  gameId: string;
   /** Último evento de juego ya contado en bestPlay. */
   seenEventSeq: number;
 }
@@ -171,6 +175,8 @@ export class RoomManager {
       match: null,
       gameStartedAt: 0,
       bestPlay: [],
+      draws: [],
+      gameId: '',
       seenEventSeq: 0,
     };
     this.rooms.set(code, room);
@@ -242,6 +248,8 @@ export class RoomManager {
     room.gamesPlayed++;
     room.gameStartedAt = this.now();
     room.bestPlay = new Array<number>(n).fill(0);
+    room.draws = new Array<number>(n).fill(0);
+    room.gameId = randomUUID();
     room.seenEventSeq = room.game.eventSeq;
   }
 
@@ -384,6 +392,7 @@ export class RoomManager {
       room.seenEventSeq = g.eventSeq;
       const e = g.lastEvent;
       if (e?.type === 'play') room.bestPlay[e.player] = Math.max(room.bestPlay[e.player] ?? 0, e.tiles.length);
+      else if (e?.type === 'draw') room.draws[e.player] = (room.draws[e.player] ?? 0) + 1;
     }
     if (g.status !== 'ended' || room.counted) return;
     room.counted = true;
@@ -414,12 +423,18 @@ export class RoomManager {
     const m = room.match;
     const duration = Math.max(0, Math.round((this.now() - room.gameStartedAt) / 1000));
     const rows: ResultRow[] = [];
+    // Posición: 1 + cuántos tienen estrictamente menos puntos (los ganadores cuentan siempre delante)
+    const placeOf = (i: number) => {
+      if (r.winners.includes(i)) return 1;
+      const pts = r.points[i] ?? 0;
+      return 1 + r.points.filter((p, j) => j !== i && (p < pts || r.winners.includes(j))).length;
+    };
     room.seats.forEach((s, i) => {
       // Quien abandonó (y jugó el bot por él) no suma ni resta
       if (!s.userId || s.replaced) return;
       const pts = r.points[i] ?? 0;
       const won = r.winners.includes(i);
-      const place = won ? 1 : 1 + r.points.filter((p, j) => j !== i && (p < pts || r.winners.includes(j))).length;
+      const place = placeOf(i);
       rows.push({
         user_id: s.userId,
         mode: 'online',
@@ -428,11 +443,24 @@ export class RoomManager {
         players: room.seats.length,
         won,
         points: pts,
-        rivals: room.seats.filter((_, j) => j !== i).map((x) => ({ name: x.name, avatar: x.avatar })),
+        rivals: room.seats
+          .map((x, j) => ({ x, j }))
+          .filter(({ j }) => j !== i)
+          .map(({ x, j }) => ({
+            name: x.name,
+            avatar: x.avatar,
+            ...(x.userId && !x.replaced ? { user_id: x.userId } : {}),
+            points: r.points[j] ?? 0,
+            place: placeOf(j),
+            won: r.winners.includes(j),
+            ...(x.replaced ? { bot: true } : {}),
+          })),
         duration_sec: duration,
         best_play: room.bestPlay[i] ?? 0,
         champion: !!m?.champions?.includes(s.token),
         best_of: m?.bestOf ?? 1,
+        game_id: room.gameId,
+        draws: room.draws[i] ?? 0,
       });
     });
     return rows;

@@ -15,6 +15,7 @@
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.4.6",
     "@rummi/shared": "1.0.0",
     "@types/node": "^22.10.0",
     "esbuild": "^0.25.0",

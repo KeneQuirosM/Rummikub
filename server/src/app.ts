@@ -51,6 +51,8 @@ const LIMITS: Record<string, { rate: number; burst: number }> = {
   chat: { rate: 1, burst: 5 },
   emote: { rate: 2, burst: 6 },
   room: { rate: 2, burst: 8 },
+  presence: { rate: 0.5, burst: 6 },
+  invite: { rate: 0.5, burst: 5 },
 };
 
 function allow(socket: S, kind: keyof typeof LIMITS, now: number): boolean {
@@ -216,8 +218,56 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
       });
   });
 
+  /** Cuentas conectadas: usuario -> sockets (menú y partidas). */
+  const online = new Map<string, Set<string>>();
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const isPlaying = (userId: string) => {
+    for (const room of rooms.rooms.values())
+      if (room.game?.status === 'playing' && room.seats.some((s) => s.userId === userId && !s.replaced)) return true;
+    return false;
+  };
+
   io.on('connection', (socket: S) => {
     socket.data.buckets = {};
+    const uid = socket.data.userId;
+    if (uid) {
+      const set = online.get(uid) ?? new Set<string>();
+      set.add(socket.id);
+      online.set(uid, set);
+      socket.on('disconnect', () => {
+        set.delete(socket.id);
+        if (!set.size && online.get(uid) === set) online.delete(uid);
+      });
+    }
+
+    socket.on('presence:query', (ids, ack) => {
+      if (typeof ack !== 'function') return;
+      if (!allow(socket, 'presence', now()) || !Array.isArray(ids)) return ack({ online: [], playing: [] });
+      const list = ids.filter((x): x is string => typeof x === 'string' && UUID.test(x)).slice(0, 200);
+      const on = list.filter((x) => online.has(x));
+      ack({ online: on, playing: on.filter(isPlaying) });
+    });
+
+    socket.on('invite:send', (p, ack) => {
+      if (typeof ack !== 'function') return;
+      if (!allow(socket, 'invite', now())) return ack({ ok: false, error: 'RATE_LIMITED' });
+      const me = socket.data.userId;
+      if (!me || !accounts) return ack({ ok: false, error: 'NO_ACCOUNT' });
+      const to = typeof p?.to === 'string' ? p.to : '';
+      const room = rooms.rooms.get(String(p?.code ?? '').toUpperCase());
+      // Solo a mi propia sala, mientras espera jugadores
+      const mySeat = room?.seats.find((s) => s.userId === me && s.socketId);
+      if (!room || !mySeat) return ack({ ok: false, error: 'ROOM_NOT_FOUND' });
+      if (room.game) return ack({ ok: false, error: 'GAME_IN_PROGRESS' });
+      const targets = online.get(to);
+      if (!targets?.size) return ack({ ok: false, error: 'OFFLINE' });
+      void accounts.areFriends(me, to).then((friends) => {
+        if (!friends) return ack({ ok: false, error: 'NOT_FRIENDS' });
+        for (const sid of targets) io.to(sid).emit('invite', { from: { id: me, name: mySeat.name, avatar: mySeat.avatar }, code: room.code });
+        log(`[room ${room.code}] invitación enviada`);
+        ack({ ok: true });
+      });
+    });
 
     socket.on('room:create', (p, ack) => {
       if (typeof ack !== 'function') return;

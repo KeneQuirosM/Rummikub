@@ -1,6 +1,6 @@
 import './styles.css';
-import { MAX_PLAYERS, ROOM_CODE_REGEX, type PlayerView } from '@rummi/shared';
-import { unlockAudio } from './audio';
+import { ACHIEVEMENTS, MAX_PLAYERS, ROOM_CODE_REGEX, type AchievementId, type InvitePayload, type PlayerView } from '@rummi/shared';
+import { sfx, unlockAudio } from './audio';
 import { applyI18n, setLang, t } from './i18n';
 import type { Transport } from './net/transport';
 import { getSessionToken, onSettingsChange, profile, settings, updateSettings } from './settings';
@@ -50,7 +50,10 @@ async function boot() {
   setupConnectivityBanner();
   registerServiceWorker();
   // Cuentas (opcionales): en segundo plano, sin frenar la carga
-  onAccountChange(() => refreshProfileChip());
+  onAccountChange(() => {
+    refreshProfileChip();
+    onAccountForFriends();
+  });
   void initAccount();
 
   const [engineMod, homeMod] = await Promise.all([
@@ -88,6 +91,99 @@ async function boot() {
   else showMenu();
 }
 
+// ------------------------------------------------------------------ amigos y logros
+
+let presenceMod: typeof import('./net/presence') | null = null;
+let pendingRequests = 0;
+
+/** Con cuentas activas: botón de Amigos, conexión de presencia e invitaciones. */
+function onAccountForFriends() {
+  const st = accountState();
+  const on = st.enabled && !!st.user;
+  show($('friends-chip'), on);
+  $('btn-invite-friends').hidden = !on;
+  if (!on || presenceMod) return;
+  void import('./net/presence').then((m) => {
+    if (presenceMod) return;
+    presenceMod = m;
+    m.startPresence();
+    m.onInvite((p) => showInvite(p));
+    void refreshPendingBadge();
+  });
+}
+
+async function refreshPendingBadge() {
+  const { listFriends } = await import('./account');
+  const list = await listFriends();
+  setPending(list ? list.filter((f) => f.status === 'incoming').length : 0);
+}
+
+function setPending(n: number) {
+  pendingRequests = n;
+  const b = $('friends-badge');
+  b.textContent = String(n);
+  b.hidden = n === 0;
+}
+
+async function openFriendsModal(opts: { roomCode?: string } = {}) {
+  const { openFriends } = await import('./ui/friends');
+  openFriends({
+    ...opts,
+    ...(opts.roomCode ? {} : { onPlayWith: (id: string) => void playWith(id) }),
+    onPending: setPending,
+    ...(pendingRequests && !opts.roomCode ? { tab: 'friends' as const } : {}),
+  });
+}
+
+/** Crear una sala e invitar directamente a un amigo. */
+async function playWith(friendId: string) {
+  await createRoom();
+  const code = pendingSocket?.code;
+  if (!code || !presenceMod) return;
+  const r = await presenceMod.sendInvite(friendId, code);
+  toast(r.ok ? t('friends.inviteSentShort') : t(`err.${r.error}`), r.ok ? 'ok' : 'error');
+}
+
+/** Invitación de un amigo: si estoy jugando solo aviso; si no, ofrezco unirme. */
+function showInvite(p: InvitePayload) {
+  const who = `${p.from.avatar} ${p.from.name}`;
+  if (session) {
+    toast(t('friends.invitedYouBusy', { who, code: p.code }), 'info', 5000);
+    return;
+  }
+  sfx.turn();
+  const m = modal(`
+    <div class="invite-card">
+      <div class="invite-avatar">${escapeHtml(p.from.avatar)}</div>
+      <h2>${t('friends.invitedYou', { name: escapeHtml(p.from.name) })}</h2>
+      <p class="muted">${t('room.code')} <b>${escapeHtml(p.code)}</b></p>
+    </div>
+    <div class="actions-row">
+      <button class="btn" data-close>${t('friends.notNow')}</button>
+      <button class="btn btn-gold" id="inv-join">${t('friends.join')}</button>
+    </div>`);
+  m.el.querySelector('#inv-join')!.addEventListener('click', () => {
+    m.close();
+    // Si estaba esperando en otra sala, salir de ella
+    if (pendingSocket && pendingSocket.code !== p.code) {
+      pendingSocket.leave();
+      pendingSocket = null;
+    }
+    void joinRoom(p.code);
+  });
+}
+
+/** Logros recién ganados: uno tras otro, con un poco de pausa al final de la partida. */
+function celebrateAchievements(ids: AchievementId[]) {
+  ids.forEach((id, i) => {
+    const a = ACHIEVEMENTS.find((x) => x.id === id);
+    setTimeout(() => {
+      sfx.valid();
+      toast(`${a?.icon ?? '🏅'} ${t('ach.unlocked')}: ${t(`ach.${id}`)}`, 'ok', 4200);
+    }, 2200 + i * 2600);
+  });
+}
+
 // ------------------------------------------------------------------ menú
 
 function refreshProfileChip() {
@@ -114,6 +210,7 @@ function bindMenu() {
   $('btn-settings').addEventListener('click', () => openSettings({ onTutorial: () => void startPractice(true) }));
   $('btn-howto').addEventListener('click', () => openHowTo(() => void startPractice(true)));
   $('profile-chip').addEventListener('click', () => openProfile(refreshProfileChip));
+  $('friends-chip').addEventListener('click', () => void openFriendsModal());
   $('btn-lobby-leave').addEventListener('click', () => {
     pendingSocket?.leave();
     pendingSocket = null;
@@ -188,6 +285,7 @@ function showLobby(code: string, tr: SocketTransport) {
     }
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
   };
+  $('btn-invite-friends').onclick = () => void openFriendsModal({ roomCode: code });
   $('btn-copy').onclick = async () => {
     try {
       await navigator.clipboard.writeText(link);
@@ -393,13 +491,14 @@ async function startGame(transport: Transport, initial?: PlayerView) {
   });
   // Estadísticas locales: registra cada partida al terminar
   const botLevel = (transport as { level?: 'easy' | 'normal' | 'hard' }).level;
-  const tracker = new GameStatsTracker(transport.kind === 'local' ? 'bot' : 'online', botLevel);
+  const tracker = new GameStatsTracker(transport.kind === 'local' ? 'bot' : 'online', botLevel, (ids) => celebrateAchievements(ids));
   const offs: (() => void)[] = [
     ctl.em.on('change', (v) => board.sync(v, ctl.rackOrder, true)),
     ctl.em.on('change', (v) => tracker.onView(v)),
     ctl.em.on('gameEvent', (e, v) => {
       if (e.type === 'start') tracker.onStart();
       else if (e.type === 'play') tracker.onPlay(e.player, e.tiles.length, v.you);
+      else if (e.type === 'draw') tracker.onDraw(e.player, v.you);
     }),
     transport.on('drag', (d) => board.showGhost(d)),
     transport.on('status', (s) => {

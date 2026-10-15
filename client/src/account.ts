@@ -35,13 +35,16 @@ interface ResultRow {
   players: number;
   won: boolean;
   points: number;
-  rivals: { name: string; avatar: string }[];
+  rivals: { name: string; avatar: string; user_id?: string; points?: number; place?: number; won?: boolean; bot?: boolean }[];
   duration_sec: number;
   best_play: number;
   champion: boolean;
+  game_id?: string | null;
+  draws?: number | null;
 }
 
-const STATS_CACHE_KEY = 'rummi.cloudStats.v1';
+const RESULT_COLS = 'played_at,mode,level,place,players,won,points,rivals,duration_sec,best_play,champion';
+const STATS_CACHE_KEY = 'rummi.cloudStats.v2';
 const LAST_USER_KEY = 'rummi.account.lastUser';
 const PENDING_KEY = 'rummi.account.pending';
 
@@ -184,14 +187,108 @@ async function onUser() {
   } catch {
     /* caché corrupta */
   }
-  await importLegacy(u.id);
+  await Promise.all([importLegacy(u.id), ensurePublicProfile()]);
   await refreshStats();
 }
 
 /** Sube el nombre y avatar a la cuenta (para recuperarlos en otro dispositivo). */
 export async function syncProfile(): Promise<void> {
   if (!sb || !session) return;
-  await sb.auth.updateUser({ data: { rummi_name: profile.name, rummi_avatar: profile.avatar } }).catch(() => {});
+  await Promise.all([
+    sb.auth.updateUser({ data: { rummi_name: profile.name, rummi_avatar: profile.avatar } }).catch(() => {}),
+    ensurePublicProfile(),
+  ]);
+}
+
+// ------------------------------------------------------------------ amigos
+
+let friendCode: string | null = null;
+/** Mi código de amigo (null si las cuentas no están listas o falta la migración v2). */
+export const myFriendCode = (): string | null => friendCode;
+
+/** Perfil visible para mis amigos (nombre, avatar) y mi código de amigo. */
+async function ensurePublicProfile(): Promise<void> {
+  if (!sb || !session) return;
+  const r = await sb.rpc('ensure_profile', { p_name: profile.name, p_avatar: profile.avatar });
+  if (!r.error && typeof r.data === 'string') {
+    friendCode = r.data;
+    emit();
+  }
+}
+
+export interface Friend {
+  userId: string;
+  name: string;
+  avatar: string;
+  status: 'friend' | 'incoming' | 'outgoing';
+}
+
+export interface RankRow {
+  userId: string;
+  name: string;
+  avatar: string;
+  isMe: boolean;
+  played: number;
+  won: number;
+  together: number;
+  myWins: number;
+  theirWins: number;
+}
+
+/** Resultado de las RPC: null = no disponible (sin cuentas o sin la migración v2). */
+export async function listFriends(): Promise<Friend[] | null> {
+  if (!sb || !session) return null;
+  const r = await sb.rpc('my_friends');
+  if (r.error) return null;
+  return ((r.data ?? []) as { user_id: string; name: string; avatar: string; status: Friend['status'] }[]).map((x) => ({
+    userId: x.user_id,
+    name: x.name,
+    avatar: x.avatar,
+    status: x.status,
+  }));
+}
+
+export async function leaderboard(): Promise<RankRow[] | null> {
+  if (!sb || !session) return null;
+  const r = await sb.rpc('friends_leaderboard');
+  if (r.error) return null;
+  return ((r.data ?? []) as Record<string, unknown>[]).map((x) => ({
+    userId: String(x.user_id),
+    name: String(x.name),
+    avatar: String(x.avatar),
+    isMe: !!x.is_me,
+    played: Number(x.played),
+    won: Number(x.won),
+    together: Number(x.together),
+    myWins: Number(x.my_wins),
+    theirWins: Number(x.their_wins),
+  }));
+}
+
+export type FriendRequestResult = 'sent' | 'accepted' | 'already' | 'self' | 'not_found' | 'not_allowed' | 'limit' | 'error';
+
+export async function addFriendByCode(code: string): Promise<FriendRequestResult> {
+  if (!sb || !session) return 'error';
+  const r = await sb.rpc('send_friend_request', { p_code: code });
+  return r.error ? 'error' : (r.data as FriendRequestResult);
+}
+
+export async function addFriendById(userId: string): Promise<FriendRequestResult> {
+  if (!sb || !session) return 'error';
+  const r = await sb.rpc('send_friend_request_to', { p_user: userId });
+  return r.error ? 'error' : (r.data as FriendRequestResult);
+}
+
+export async function respondFriend(userId: string, accept: boolean): Promise<boolean> {
+  if (!sb || !session) return false;
+  const r = await sb.rpc('respond_friend_request', { p_from: userId, p_accept: accept });
+  return !r.error;
+}
+
+export async function removeFriend(userId: string): Promise<boolean> {
+  if (!sb || !session) return false;
+  const r = await sb.rpc('remove_friend', { p_user: userId });
+  return !r.error;
 }
 
 /** Primera vez que esta cuenta se usa en la nube: subir lo que ya había en el teléfono (una sola vez). */
@@ -210,10 +307,12 @@ export async function refreshStats(): Promise<void> {
     sb.from('legacy_stats').select('data').eq('user_id', u.id).maybeSingle(),
     sb
       .from('results')
-      .select('played_at,mode,level,place,players,won,points,rivals,duration_sec,best_play,champion')
+      .select(`${RESULT_COLS},game_id,draws`)
       .eq('user_id', u.id)
       .order('played_at', { ascending: true })
-      .limit(2000),
+      .limit(2000)
+      // Base de datos sin la migración v2: leer las columnas originales
+      .then((r) => (r.error ? sb!.from('results').select(RESULT_COLS).eq('user_id', u.id).order('played_at', { ascending: true }).limit(2000) : r)),
   ]);
   if (results.error) return;
   const d = legacy.data ? normalizeStats((legacy.data as { data: unknown }).data) : emptyStats();
@@ -232,10 +331,21 @@ function toRecord(r: ResultRow): GameRecord {
     players: r.players,
     won: r.won,
     myPoints: r.points,
-    rivals: Array.isArray(r.rivals) ? r.rivals : [],
+    rivals: (Array.isArray(r.rivals) ? r.rivals : []).map((x) => ({
+      name: x.name,
+      avatar: x.avatar,
+      ...(x.user_id ? { userId: x.user_id } : {}),
+      ...(x.points !== undefined ? { points: x.points } : {}),
+      ...(x.place !== undefined ? { place: x.place } : {}),
+      ...(x.won !== undefined ? { won: x.won } : {}),
+      ...(x.bot ? { bot: true } : {}),
+    })),
     durationSec: r.duration_sec,
     bestPlay: r.best_play,
     ...(r.champion ? { champion: true } : {}),
+    // Partidas anotadas antes de contar los robos (columna nueva) quedan como "desconocido"
+    ...(typeof r.draws === 'number' && r.game_id !== undefined ? { draws: r.draws } : {}),
+    ...(r.game_id ? { gameId: r.game_id } : {}),
   };
 }
 
@@ -249,7 +359,7 @@ async function recordGame(r: GameRecord) {
     emit();
   }
   if (r.mode === 'bot') {
-    await sb.from('results').insert({
+    const row = {
       user_id: u.id,
       mode: 'bot',
       level: r.level ?? null,
@@ -257,11 +367,13 @@ async function recordGame(r: GameRecord) {
       players: r.players,
       won: r.won,
       points: Math.min(2000, r.myPoints),
-      rivals: r.rivals.slice(0, 3),
+      rivals: r.rivals.slice(0, 3).map((x) => ({ name: x.name, avatar: x.avatar, points: x.points, place: x.place, won: x.won })),
       duration_sec: Math.min(86400, r.durationSec),
       best_play: Math.min(106, r.bestPlay),
       champion: !!r.champion,
-    });
+    };
+    const res = await sb.from('results').insert({ ...row, draws: Math.min(200, r.draws ?? 0) });
+    if (res.error) await sb.from('results').insert(row); // base sin la migración v2
   }
   // La partida online la anota el servidor: releer un poco después
   setTimeout(() => void refreshStats(), r.mode === 'online' ? 4000 : 500);
@@ -313,6 +425,7 @@ export async function signOut(): Promise<void> {
   await sb.auth.signOut();
   cloud = null;
   handledUser = null;
+  friendCode = null;
   store(STATS_CACHE_KEY, null);
   const r = await sb.auth.signInAnonymously();
   session = r.data.session;

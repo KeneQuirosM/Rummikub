@@ -386,7 +386,8 @@ kbd { background: #222; border: 1px solid #444; border-radius: 4px; padding: 1px
 .btn-col { flex-direction: column; gap: 2px; min-height: 64px; padding: 6px 4px; font-size: 13px; line-height: 1.15; text-align: center; }
 .btn-col .ico { font-size: 20px; }
 .stats-modal { width: min(460px, 100%); }
-.stats-tabs { display: grid; grid-template-columns: repeat(3, 1fr); width: 100%; margin-bottom: 12px; }
+.stats-tabs { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; width: 100%; margin-bottom: 12px; }
+.stats-tabs button { padding: 8px 4px; }
 .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .stat { background: rgba(0, 0, 0, 0.3); border-radius: 12px; padding: 10px 6px; text-align: center; display: flex; flex-direction: column; gap: 2px; }
 .stat b { font-size: 24px; color: var(--gold); font-weight: 800; }
@@ -446,3 +447,76 @@ kbd { background: #222; border: 1px solid #444; border-radius: 4px; padding: 1px
 .account-msg { font-size: 13px; line-height: 1.4; min-height: 0; color: var(--gold); }
 .account-msg:empty { display: none; }
 .account-msg[data-kind="error"] { color: #ff8a80; }
+
+/* ------------------------------------------------------------ amigos */
+.friends-chip {
+  position: absolute; top: calc(12px + var(--sat)); left: calc(12px + var(--sal));
+  display: flex; align-items: center; gap: 8px; padding: 0 16px 0 12px; min-height: 46px;
+  border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; font-weight: 600;
+}
+.friends-chip[hidden] { display: none; }
+.friends-chip .ico { font-size: 20px; }
+.dot-badge {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px;
+  border-radius: 999px; background: #e5484d; color: #fff; font-size: 12px; font-style: normal; font-weight: 800;
+}
+.dot-badge[hidden] { display: none; }
+.friends-modal { width: min(460px, 100%); }
+.friends-body { min-height: 120px; }
+.friends-empty { text-align: center; margin: 22px 0 12px; }
+.friends-body > .btn { width: 100%; }
+.friend-list, .rank-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; max-height: 44vh; overflow-y: auto; touch-action: pan-y; }
+.friend-row, .rank-list li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 12px; background: rgba(0, 0, 0, 0.3); }
+.friend-row .who, .rank-list .who { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.friend-row .who b, .rank-list .who b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.friend-row .acts { display: flex; gap: 6px; flex: none; }
+.btn.btn-sm { min-height: 36px; padding: 0 12px; font-size: 14px; border-radius: 10px; }
+.presence { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 5px; }
+.presence::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: #5b6461; }
+.presence.online { color: #6ee7a8; }
+.presence.online::before { background: #34d399; box-shadow: 0 0 8px #34d399; }
+.presence.playing { color: var(--gold); }
+.presence.playing::before { background: var(--gold); }
+.rank-list li.me { background: rgba(242, 199, 92, 0.14); border: 1px solid rgba(242, 199, 92, 0.35); }
+.rank-list .pos { width: 28px; text-align: center; font-weight: 800; font-size: 18px; }
+.rank-list .who small { font-size: 12px; color: var(--muted); }
+.rank-list .wins { font-weight: 800; font-size: 20px; text-align: right; }
+.rank-list .wins small { display: block; font-size: 11px; }
+.friend-code {
+  font-size: 34px; font-weight: 800; letter-spacing: .28em; text-align: center; padding: 10px 0 10px .28em;
+  border-radius: 14px; background: rgba(0, 0, 0, 0.35); border: 1px dashed rgba(242, 199, 92, 0.5); color: var(--gold);
+  font-variant-numeric: tabular-nums; user-select: all;
+}
+.code-input { text-transform: uppercase; letter-spacing: .2em; text-align: center; font-weight: 700; }
+.invite-card { text-align: center; }
+.invite-card h2 { margin: 8px 0 4px; }
+.invite-avatar { font-size: 56px; line-height: 1; animation: invite-pop .5s cubic-bezier(.2, 1.6, .4, 1); }
+@keyframes invite-pop { from { transform: scale(.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+/* ------------------------------------------------------------ historial detallado */
+.history li { flex-wrap: wrap; cursor: pointer; }
+.history li.open { outline: 1px solid rgba(242, 199, 92, 0.45); }
+.stats-sub small { font-weight: 500; font-size: 12px; }
+.game-detail { flex-basis: 100%; cursor: default; padding-top: 8px; border-top: 1px solid var(--line); margin-top: 4px; }
+.detail-rivals { list-style: none; padding: 0; margin: 0 0 8px; display: grid; gap: 4px; }
+.detail-rivals li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; background: rgba(255, 255, 255, 0.04); border-radius: 10px; }
+.detail-rivals li.you { background: rgba(242, 199, 92, 0.1); }
+.detail-rivals .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.detail-rivals .pts { font-size: 15px; }
+.avatar.sm { width: 28px; height: 28px; font-size: 16px; }
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.detail-grid div { display: flex; flex-direction: column; padding: 6px 8px; border-radius: 10px; background: rgba(0, 0, 0, 0.25); }
+.detail-grid span { font-size: 11px; color: var(--muted); }
+.detail-grid b { font-size: 14px; }
+
+/* ------------------------------------------------------------ logros */
+.ach-count { text-align: center; margin: 4px 0 10px; }
+.ach-grid { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; max-height: 52vh; overflow-y: auto; touch-action: pan-y; }
+.ach-grid li { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 3px; padding: 10px 6px; border-radius: 14px; background: rgba(0, 0, 0, 0.3); opacity: .55; }
+.ach-grid li.on { opacity: 1; background: linear-gradient(180deg, rgba(242, 199, 92, 0.18), rgba(242, 199, 92, 0.05)); border: 1px solid rgba(242, 199, 92, 0.35); }
+.ach-icon { font-size: 30px; line-height: 1.1; }
+.ach-grid li:not(.on) .ach-icon { filter: grayscale(1); }
+.ach-grid b { font-size: 13px; line-height: 1.15; }
+.ach-grid small { font-size: 11px; color: var(--muted); line-height: 1.2; }
+.ach-grid small.when { color: var(--gold); opacity: .8; }
+@media (max-width: 360px) { .ach-grid { grid-template-columns: repeat(2, 1fr); } }

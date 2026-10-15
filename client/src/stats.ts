@@ -2,7 +2,7 @@
  * Historial y estadísticas. Siempre se guardan en el teléfono (localStorage); con cuenta,
  * además se leen desde la nube (ver account.ts) y `currentStats()` devuelve esas.
  */
-import type { PlayerView } from '@rummi/shared';
+import { achievementsForGame, achievementsFromTotals, type AchievementId, type PlayerView } from '@rummi/shared';
 
 export type GameMode = 'online' | 'bot';
 export type BotLevelName = 'easy' | 'normal' | 'hard';
@@ -16,13 +16,28 @@ export interface GameRecord {
   players: number;
   won: boolean;
   myPoints: number;
-  /** Rivales (avatar + nombre) para el historial. */
-  rivals: { name: string; avatar: string }[];
+  /** Rivales para el historial (con su resultado y, si tienen cuenta, su id para agregarlos). */
+  rivals: RivalRecord[];
   durationSec: number;
   /** Más fichas que coloqué en un solo turno. */
   bestPlay: number;
   /** Esta partida cerró un torneo que gané. */
   champion?: boolean;
+  /** Fichas que robé (undefined en partidas antiguas). */
+  draws?: number;
+  /** Partida online compartida (para agregar como amigo a quien jugó conmigo). */
+  gameId?: string;
+}
+
+export interface RivalRecord {
+  name: string;
+  avatar: string;
+  userId?: string;
+  points?: number;
+  place?: number;
+  won?: boolean;
+  /** Abandonó y terminó el bot por él. */
+  bot?: boolean;
 }
 
 export interface ModeTotals {
@@ -41,10 +56,12 @@ export interface StatsData {
   v: 1;
   records: GameRecord[];
   totals: Record<GameMode, ModeTotals>;
+  /** Logros desbloqueados: id -> momento. */
+  achievements: Partial<Record<AchievementId, number>>;
 }
 
 const KEY = 'rummi.stats.v1';
-const MAX_RECORDS = 20;
+const MAX_RECORDS = 50;
 
 const emptyTotals = (): ModeTotals => ({ played: 0, won: 0, streak: 0, bestStreak: 0, bestPlay: 0, fastestWin: 0, tourneys: 0 });
 
@@ -86,14 +103,26 @@ export function currentStats(): StatsData {
 }
 
 export function emptyStats(): StatsData {
-  return { v: 1, records: [], totals: { online: emptyTotals(), bot: emptyTotals() } };
+  return { v: 1, records: [], totals: { online: emptyTotals(), bot: emptyTotals() }, achievements: {} };
 }
 
 /** Normaliza datos de origen desconocido (localStorage o la nube). */
-export function normalizeStats(d: unknown): StatsData {
-  const x = d as Partial<StatsData> | null;
+export function normalizeStats(raw: unknown): StatsData {
+  const x = raw as Partial<StatsData> | null;
   if (x?.v !== 1 || !Array.isArray(x.records)) return emptyStats();
-  return { v: 1, records: x.records.slice(0, MAX_RECORDS), totals: { online: { ...emptyTotals(), ...x.totals?.online }, bot: { ...emptyTotals(), ...x.totals?.bot } } };
+  const d: StatsData = {
+    v: 1,
+    records: x.records.slice(0, MAX_RECORDS),
+    totals: { online: { ...emptyTotals(), ...x.totals?.online }, bot: { ...emptyTotals(), ...x.totals?.bot } },
+    achievements: { ...(x.achievements ?? {}) },
+  };
+  // Estadísticas de antes de los logros: deducir los que ya se habían ganado
+  if (!x.achievements) {
+    const c = combinedTotals(d);
+    const at = d.records[0]?.at ?? Date.now();
+    for (const id of achievementsFromTotals({ ...c, onlineWon: d.totals.online.won })) d.achievements[id] = at;
+  }
+  return d;
 }
 
 /** Suma una partida a unas estadísticas (sin guardar). */
@@ -110,13 +139,19 @@ export function applyRecord(d: StatsData, r: GameRecord): void {
   } else t.streak = 0;
   t.bestPlay = Math.max(t.bestPlay, r.bestPlay);
   if (r.champion) t.tourneys++;
+  const all = { played: d.totals.online.played + d.totals.bot.played, won: d.totals.online.won + d.totals.bot.won };
+  for (const id of achievementsForGame(r, { ...all, onlineWon: d.totals.online.won, streak: t.streak })) d.achievements[id] ??= r.at;
 }
 
-export function addRecord(r: GameRecord): void {
+/** Registra una partida. Devuelve los logros que se acaban de desbloquear (para celebrarlos). */
+export function addRecord(r: GameRecord): AchievementId[] {
+  const before = new Set(Object.keys(currentStats().achievements));
   const d = loadStats();
   applyRecord(d, r);
   saveStats(d);
   recordListeners.forEach((f) => f(r));
+  // Con cuenta, `currentStats()` ya incluye la partida (se aplica al instante en la nube)
+  return (Object.keys(currentStats().achievements) as AchievementId[]).filter((id) => !before.has(id));
 }
 
 /** Suma de dos totales (para la vista "Todas"). La racha actual es la de la última partida jugada. */
@@ -149,14 +184,24 @@ export function clearStats(): void {
 export class GameStatsTracker {
   private startedAt = Date.now();
   private bestPlay = 0;
+  private draws = 0;
   private recorded = false;
 
-  constructor(private mode: GameMode, private level?: BotLevelName) {}
+  constructor(
+    private mode: GameMode,
+    private level?: BotLevelName,
+    private onAchievements?: (ids: AchievementId[]) => void,
+  ) {}
 
   onStart() {
     this.startedAt = Date.now();
     this.bestPlay = 0;
+    this.draws = 0;
     this.recorded = false;
+  }
+
+  onDraw(player: number, me: number) {
+    if (player === me) this.draws++;
   }
 
   onPlay(player: number, tiles: number, me: number) {
@@ -170,8 +215,13 @@ export class GameStatsTracker {
     const myPts = r.points[v.you] ?? 0;
     const won = r.winners.includes(v.you);
     // Posición: 1 + cuántos tienen estrictamente menos puntos (los ganadores por "out" tienen 0)
-    const place = won ? 1 : 1 + r.points.filter((p, i) => i !== v.you && (p < myPts || r.winners.includes(i))).length;
-    addRecord({
+    const placeOf = (i: number) => {
+      if (r.winners.includes(i)) return 1;
+      const pts = r.points[i] ?? 0;
+      return 1 + r.points.filter((p, j) => j !== i && (p < pts || r.winners.includes(j))).length;
+    };
+    const place = placeOf(v.you);
+    const fresh = addRecord({
       at: Date.now(),
       mode: this.mode,
       ...(this.mode === 'bot' && this.level ? { level: this.level } : {}),
@@ -179,10 +229,15 @@ export class GameStatsTracker {
       players: v.players.length,
       won,
       myPoints: myPts,
-      rivals: v.players.filter((_, i) => i !== v.you).map((p) => ({ name: p.name, avatar: p.avatar })),
+      rivals: v.players
+        .map((p, i) => ({ p, i }))
+        .filter(({ i }) => i !== v.you)
+        .map(({ p, i }) => ({ name: p.name, avatar: p.avatar, points: r.points[i] ?? 0, place: placeOf(i), won: r.winners.includes(i) })),
       durationSec: Math.round((Date.now() - this.startedAt) / 1000),
       bestPlay: this.bestPlay,
+      draws: this.draws,
       ...(v.match?.champions?.includes(v.you) ? { champion: true } : {}),
     });
+    if (fresh.length) this.onAchievements?.(fresh);
   }
 }

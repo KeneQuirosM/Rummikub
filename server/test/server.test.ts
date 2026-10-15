@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { io as ioc, type Socket } from 'socket.io-client';
-import type { Ack, ClientToServerEvents, PlayerView, RoomJoined, ServerToClientEvents } from '@rummi/shared';
+import type { Ack, ClientToServerEvents, InvitePayload, PlayerView, PresenceInfo, RoomJoined, ServerToClientEvents } from '@rummi/shared';
 import { createApp, type App } from '../src/app.js';
 import type { Accounts, ResultRow } from '../src/accounts.js';
 import { RoomManager, sanitizeChat, sanitizeName } from '../src/rooms.js';
@@ -412,6 +412,10 @@ describe('RoomManager', () => {
   });
 });
 
+const U2 = '22222222-2222-2222-2222-222222222222';
+const U3 = '33333333-3333-3333-3333-333333333333';
+const U4 = '44444444-4444-4444-4444-444444444444';
+
 describe('cuentas', () => {
   it('al terminar se anotan los resultados de quienes tienen cuenta (no de quien abandonó)', () => {
     let t = 1_000;
@@ -429,6 +433,10 @@ describe('cuentas', () => {
     // Mejor jugada: se cuenta desde los eventos del motor
     g.lastEvent = { type: 'play', player: 0, seq: ++g.eventSeq, tiles: [1, 2, 3, 4] };
     (rm as unknown as { countResult(r: typeof room): void }).countResult(room);
+    for (let k = 0; k < 2; k++) {
+      g.lastEvent = { type: 'draw', player: 0, seq: ++g.eventSeq };
+      (rm as unknown as { countResult(r: typeof room): void }).countResult(room);
+    }
     t += 95_000;
     g.status = 'ended';
     g.result = { winners: [0], reason: 'out', points: [0, 12, 30] };
@@ -438,8 +446,11 @@ describe('cuentas', () => {
     expect(rows[0]).toEqual([
       {
         user_id: '11111111-1111-1111-1111-111111111111', mode: 'online', level: null, place: 1, players: 3, won: true, points: 0,
-        rivals: [{ name: 'Beto', avatar: '🐼' }, { name: 'Caro', avatar: '🐯' }],
-        duration_sec: 95, best_play: 4, champion: false, best_of: 3,
+        rivals: [
+          { name: 'Beto', avatar: '🐼', points: 12, place: 2, won: false },
+          { name: 'Caro', avatar: '🐯', points: 30, place: 3, won: false, bot: true },
+        ],
+        duration_sec: 95, best_play: 4, champion: false, best_of: 3, game_id: room.gameId, draws: 2,
       },
     ]);
   });
@@ -448,8 +459,9 @@ describe('cuentas', () => {
     const recorded: ResultRow[][] = [];
     const accounts: Accounts = {
       publicConfig: { url: 'https://x.supabase.co', anonKey: 'anon' },
-      verify: async (tok) => (tok === 'good' ? '22222222-2222-2222-2222-222222222222' : null),
+      verify: async (tok) => ({ good: U2, good3: U3, good4: U4 })[tok] ?? null,
       record: (r) => recorded.push(r),
+      areFriends: async (a, b) => [a, b].sort().join() === [U2, U3].sort().join(),
     };
     const a2 = await createApp({ port: 0, accounts });
     try {
@@ -467,7 +479,24 @@ describe('cuentas', () => {
       if (!ra.ok) throw new Error('create');
       expect((await join(b, ra.code)).ok).toBe(true);
       const room = a2.rooms.rooms.get(ra.code)!;
-      expect(room.seats.map((s) => s.userId)).toEqual(['22222222-2222-2222-2222-222222222222', null]);
+      expect(room.seats.map((s) => s.userId)).toEqual([U2, null]);
+
+      // Presencia e invitaciones: el amigo está en el menú (socket sin sala)
+      const friend = await mk('good3');
+      const stranger = await mk('good4');
+      const presence = await new Promise<PresenceInfo>((res) => a.emit('presence:query', [U3, U4, '33333333-0000-0000-0000-000000000000', 'x'], res));
+      expect(presence).toEqual({ online: [U3, U4], playing: [] });
+      const got = new Promise<InvitePayload>((res) => friend.once('invite', res));
+      expect(await new Promise<Ack>((res) => a.emit('invite:send', { to: U3, code: ra.code }, res))).toEqual({ ok: true });
+      expect(await got).toEqual({ from: { id: U2, name: 'Ana', avatar: '🦊' }, code: ra.code });
+      // No amigo, desconectado, sala ajena o sin cuenta: rechazado
+      expect(await new Promise<Ack>((res) => a.emit('invite:send', { to: U4, code: ra.code }, res))).toEqual({ ok: false, error: 'NOT_FRIENDS' });
+      expect(await new Promise<Ack>((res) => a.emit('invite:send', { to: '99999999-0000-0000-0000-000000000000', code: ra.code }, res))).toEqual({ ok: false, error: 'OFFLINE' });
+      expect(await new Promise<Ack>((res) => stranger.emit('invite:send', { to: U3, code: ra.code }, res))).toEqual({ ok: false, error: 'ROOM_NOT_FOUND' });
+      expect(await new Promise<Ack>((res) => b.emit('invite:send', { to: U3, code: ra.code }, res))).toEqual({ ok: false, error: 'NO_ACCOUNT' });
+      // En partida: aparece como "jugando"
+      expect((await new Promise<Ack>((res) => a.emit('room:start', res))).ok).toBe(true);
+      expect(await new Promise<PresenceInfo>((res) => friend.emit('presence:query', [U2], res))).toEqual({ online: [U2], playing: [U2] });
     } finally {
       await a2.close();
     }
