@@ -4,6 +4,7 @@ import { extname, join, normalize, resolve } from 'node:path';
 import { Server, type Socket } from 'socket.io';
 import type { ClientToServerEvents, Seat, ServerToClientEvents } from '@rummi/shared';
 import type { Accounts } from './accounts.js';
+import type { RoomStore } from './store.js';
 import { isEmote, RoomManager, sanitizeChat, type Room } from './rooms.js';
 
 export interface AppOptions {
@@ -16,6 +17,8 @@ export interface AppOptions {
   log?: (...a: unknown[]) => void;
   /** Cuentas (Supabase). null = sin cuentas. */
   accounts?: Accounts | null;
+  /** Persistencia de salas (sobrevivir a reinicios). null = solo en memoria. */
+  store?: RoomStore | null;
 }
 
 interface SocketData {
@@ -98,6 +101,57 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
   const log = opts.log ?? (() => {});
   const rooms = new RoomManager(now);
   const accounts = opts.accounts ?? null;
+  const store = opts.store ?? null;
+  /** Guardado diferido por sala (agrupa ráfagas de cambios). */
+  const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const SAVE_DELAY_MS = 300;
+  const persist = (room: Room) => {
+    if (!store || saveTimers.has(room.code)) return;
+    saveTimers.set(
+      room.code,
+      setTimeout(() => {
+        saveTimers.delete(room.code);
+        // Si la sala ya no existe (se cerró), no resucitarla
+        if (rooms.rooms.get(room.code) === room) void store.save(room.code, rooms.serialize(room));
+      }, SAVE_DELAY_MS),
+    );
+  };
+  const forget = (code: string) => {
+    const t = saveTimers.get(code);
+    if (t) clearTimeout(t);
+    saveTimers.delete(code);
+    if (store) void store.remove(code);
+  };
+  /** Sala en memoria o, si el servidor se reinició, recuperada de la persistencia. */
+  const loading = new Map<string, Promise<Room | null>>();
+  const ensureRoom = (rawCode: unknown): Promise<Room | null> => {
+    const code = typeof rawCode === 'string' ? rawCode.toUpperCase().trim() : '';
+    if (!/^[A-Z]{4}$/.test(code)) return Promise.resolve(null);
+    const mem = rooms.rooms.get(code);
+    // Recuperada y todavía sin nadie conectado: puede haber una copia más nueva (el servidor
+    // anterior siguió jugando un momento antes de apagarse)
+    const recheck = mem?.restoredFrom !== undefined && !mem.seats.some((x) => x.socketId);
+    if ((mem && !recheck) || !store) return Promise.resolve(mem ?? null);
+    const pending = loading.get(code);
+    if (pending) return pending;
+    const p = store
+      .load(code)
+      .then((st) => {
+        const cur = rooms.rooms.get(code);
+        if (!st) return cur ?? null;
+        if (cur && (cur.restoredFrom === undefined || cur.seats.some((x) => x.socketId) || st.savedAt <= cur.restoredFrom)) return cur;
+        if (cur) clearRoomTimers(code);
+        const room = rooms.restore(code, st.data, st.savedAt);
+        if (room) {
+          log(`[room ${code}] recuperada tras reinicio`);
+          schedule(room);
+        }
+        return room ?? cur ?? null;
+      })
+      .finally(() => loading.delete(code));
+    loading.set(code, p);
+    return p;
+  };
   if (accounts) rooms.onResults = (rows) => accounts.record(rows);
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -105,6 +159,30 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
     if (req.url === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, rooms: rooms.rooms.size }));
+      return;
+    }
+    // ¿Sigue existiendo mi partida? (botón "Volver a tu partida" del menú)
+    if (req.url?.startsWith('/room-status?')) {
+      const q = new URL(req.url, 'http://x').searchParams;
+      void ensureRoom(q.get('code')).then((room) => {
+        const seat = room ? rooms.seatByToken(room, q.get('token') ?? undefined) : -1;
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(
+          JSON.stringify(
+            room && seat >= 0
+              ? {
+                  exists: true,
+                  status: room.game?.status ?? 'waiting',
+                  players: room.seats.length,
+                }
+              : { exists: false },
+          ),
+        );
+      });
       return;
     }
     // Configuración pública para el cliente (las cuentas son opcionales)
@@ -129,6 +207,7 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
   const botTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   const broadcast = (room: Room) => {
+    persist(room);
     room.seats.forEach((s, i) => {
       if (s.socketId) io.to(s.socketId).emit('state', rooms.view(room, i));
     });
@@ -272,34 +351,48 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
     socket.on('room:create', (p, ack) => {
       if (typeof ack !== 'function') return;
       if (!allow(socket, 'room', now())) return ack({ ok: false, error: 'RATE_LIMITED' });
-      const { room, seat, token } = rooms.create(p ?? {}, p?.settings, socket.id);
-      room.seats[seat]!.userId = socket.data.userId ?? null;
-      attach(socket, room, token);
-      log(`[room ${room.code}] creada`);
-      ack({ ok: true, code: room.code, token, seat });
-      broadcast(room);
+      void (async () => {
+        let created = rooms.create(p ?? {}, p?.settings, socket.id);
+        // No reutilizar el código de una sala guardada que todavía no se recuperó
+        for (let i = 0; store && i < 5 && (await store.load(created.room.code)); i++) {
+          rooms.rooms.delete(created.room.code);
+          created = rooms.create(p ?? {}, p?.settings, socket.id);
+        }
+        const { room, seat, token } = created;
+        room.seats[seat]!.userId = socket.data.userId ?? null;
+        attach(socket, room, token);
+        log(`[room ${room.code}] creada`);
+        ack({ ok: true, code: room.code, token, seat });
+        broadcast(room);
+      })();
     });
 
     socket.on('room:join', (p, ack) => {
       if (typeof ack !== 'function') return;
       if (!allow(socket, 'room', now())) return ack({ ok: false, error: 'RATE_LIMITED' });
-      const prevSocket = (() => {
-        const room = rooms.rooms.get(String(p?.code ?? '').toUpperCase());
-        const s = room?.seats.find((x) => x.token === p?.token);
-        return s?.socketId ?? null;
-      })();
-      const r = rooms.join(p?.code, p ?? {}, p?.token, socket.id);
-      if (!r.ok) return ack(r);
-      // Vincular la cuenta (al reconectar sin token válido se conserva la anterior)
-      const st = r.room.seats[r.seat]!;
-      if (socket.data.userId) st.userId = socket.data.userId;
-      else if (!r.reconnected) st.userId = null;
-      // Expulsar la conexión anterior del mismo asiento (otra pestaña / socket zombie)
-      if (prevSocket && prevSocket !== socket.id) io.sockets.sockets.get(prevSocket)?.disconnect(true);
-      attach(socket, r.room, r.token);
-      log(`[room ${r.room.code}] asiento ${r.seat} ${r.reconnected ? 'reconectado' : 'unido'}`);
-      ack({ ok: true, code: r.room.code, token: r.token, seat: r.seat });
-      broadcast(r.room);
+      // Si el servidor se reinició, la sala se recupera de la persistencia
+      void ensureRoom(p?.code).then(() => {
+        if (!socket.connected) return;
+        const prevSocket = (() => {
+          const room = rooms.rooms.get(String(p?.code ?? '').toUpperCase());
+          const s = room?.seats.find((x) => x.token === p?.token);
+          return s?.socketId ?? null;
+        })();
+        const r = rooms.join(p?.code, p ?? {}, p?.token, socket.id);
+        if (!r.ok) return ack(r);
+        // Ya hay alguien conectado en este servidor: esta copia pasa a ser la buena
+        delete r.room.restoredFrom;
+        // Vincular la cuenta (al reconectar sin token válido se conserva la anterior)
+        const st = r.room.seats[r.seat]!;
+        if (socket.data.userId) st.userId = socket.data.userId;
+        else if (!r.reconnected) st.userId = null;
+        // Expulsar la conexión anterior del mismo asiento (otra pestaña / socket zombie)
+        if (prevSocket && prevSocket !== socket.id) io.sockets.sockets.get(prevSocket)?.disconnect(true);
+        attach(socket, r.room, r.token);
+        log(`[room ${r.room.code}] asiento ${r.seat} ${r.reconnected ? 'reconectado' : 'unido'}`);
+        ack({ ok: true, code: r.room.code, token: r.token, seat: r.seat });
+        broadcast(r.room);
+      });
     });
 
     socket.on('game:intent', (intent, ack) => {
@@ -380,6 +473,7 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
       if (r.closed) {
         io.to(ctx.room.code).emit('room:closed');
         clearRoomTimers(ctx.room.code);
+        forget(ctx.room.code);
       } else broadcast(r.room);
     });
 
@@ -394,10 +488,16 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
   const sweeper = setInterval(() => {
     for (const code of rooms.sweep()) {
       clearRoomTimers(code);
+      forget(code);
       log(`[room ${code}] eliminada por inactividad`);
     }
   }, 60_000);
   sweeper.unref();
+  // Salas guardadas que nadie recuperó: se borran a las 12 h
+  const pruneStore = () => void store?.prune(12 * 60 * 60_000);
+  pruneStore();
+  const pruner = setInterval(pruneStore, 60 * 60_000);
+  pruner.unref();
 
   return new Promise((resolveApp) => {
     http.listen(opts.port ?? 0, () => {
@@ -411,9 +511,16 @@ export function createApp(opts: AppOptions = {}): Promise<App> {
         close: () =>
           new Promise<void>((res) => {
             clearInterval(sweeper);
+            clearInterval(pruner);
             timers.forEach(clearTimeout);
             botTimers.forEach(clearTimeout);
-            io.close(() => res());
+            io.close(() => {
+              // Guardar TODAS las salas antes de apagar (el servidor nuevo las recupera)
+              saveTimers.forEach(clearTimeout);
+              saveTimers.clear();
+              const all = store ? [...rooms.rooms.values()].map((r) => store.save(r.code, rooms.serialize(r))) : [];
+              void Promise.all(all).then(() => res());
+            });
           }),
       });
     });

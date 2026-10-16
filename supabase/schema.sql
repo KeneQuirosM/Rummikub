@@ -268,3 +268,16 @@ grant execute on function public.respond_friend_request(uuid, boolean) to authen
 grant execute on function public.remove_friend(uuid) to authenticated;
 grant execute on function public.my_friends() to authenticated;
 grant execute on function public.friends_leaderboard() to authenticated;
+
+-- =====================================================================================
+-- v3 · Salas guardadas para sobrevivir a reinicios y redespliegues del servidor.
+-- Solo el servidor (llave secreta) lee y escribe: RLS activado y sin políticas.
+-- =====================================================================================
+create table if not exists public.rooms_state (
+  code text primary key check (code ~ '^[A-Z]{4}$'),
+  data jsonb not null,
+  saved_at timestamptz not null default now()
+);
+create index if not exists rooms_state_saved_idx on public.rooms_state (saved_at);
+alter table public.rooms_state enable row level security;
+revoke all on public.rooms_state from anon, authenticated;

@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { supabaseAccounts } from './accounts.js';
 import { createApp } from './app.js';
+import { supabaseStore } from './store.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT ?? 3001);
@@ -12,8 +13,12 @@ const staticDir = process.env.SERVE_CLIENT === 'false' ? null : (candidates.find
 
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
 const accounts = supabaseAccounts(process.env, log);
-const app = await createApp({ port, corsOrigins, staticDir, log, accounts });
-console.log(`Rummi 3D server escuchando en :${app.port}${staticDir ? ` (sirviendo cliente desde ${staticDir})` : ''}${accounts ? ' · cuentas: Supabase' : ' · cuentas: desactivadas'}`);
+const store = supabaseStore(process.env, log);
+const app = await createApp({ port, corsOrigins, staticDir, log, accounts, store });
+console.log(
+  `Rummi 3D server escuchando en :${app.port}${staticDir ? ` (sirviendo cliente desde ${staticDir})` : ''}` +
+    `${accounts ? ' · cuentas: Supabase' : ' · cuentas: desactivadas'}${store ? ' · salas: persistentes' : ' · salas: en memoria'}`,
+);
 
 const shutdown = async () => {
   console.log('Cerrando…');

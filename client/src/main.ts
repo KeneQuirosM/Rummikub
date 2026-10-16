@@ -3,7 +3,7 @@ import { ACHIEVEMENTS, MAX_PLAYERS, ROOM_CODE_REGEX, type AchievementId, type In
 import { sfx, unlockAudio } from './audio';
 import { applyI18n, setLang, t } from './i18n';
 import type { Transport } from './net/transport';
-import { getSessionToken, onSettingsChange, profile, settings, updateSettings } from './settings';
+import { getSessionToken, latestSession, onSettingsChange, profile, settings, updateSettings } from './settings';
 import { accountReady, accountState, initAccount, onAccountChange } from './account';
 import { GameStatsTracker } from './stats';
 import { $, banner, closeAllModals, confirmDialog, escapeHtml, modal, show, toast } from './ui/dom';
@@ -184,6 +184,40 @@ function celebrateAchievements(ids: AchievementId[]) {
   });
 }
 
+// ------------------------------------------------------------------ volver a tu partida
+
+/** Si quedó una partida mía abierta (cerré la pestaña sin querer), ofrecer volver. */
+async function checkResume() {
+  const btn = $<HTMLButtonElement>('btn-resume');
+  const last = latestSession();
+  if (!last || session || pendingSocket) {
+    btn.hidden = true;
+    return;
+  }
+  try {
+    const server = (import.meta.env.VITE_SERVER_URL as string | undefined) || '';
+    const res = await fetch(`${server}/room-status?code=${encodeURIComponent(last.code)}&token=${encodeURIComponent(last.token)}`, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(8000),
+    });
+    const st = (await res.json()) as { exists: boolean; status?: string; players?: number };
+    // Mientras tanto pude haber entrado a otra partida
+    if (session || pendingSocket || !$('lobby').hidden) return;
+    if (!st.exists || st.status === 'ended') {
+      btn.hidden = true;
+      return;
+    }
+    $('resume-sub').textContent = t(st.status === 'playing' ? 'menu.resumePlaying' : 'menu.resumeWaiting', { code: last.code, n: st.players ?? 0 });
+    btn.onclick = () => {
+      btn.hidden = true;
+      void joinRoom(last.code);
+    };
+    btn.hidden = false;
+  } catch {
+    btn.hidden = true;
+  }
+}
+
 // ------------------------------------------------------------------ menú
 
 function refreshProfileChip() {
@@ -197,6 +231,7 @@ function showMenu() {
   show($('menu'), true);
   show($('lobby'), false);
   refreshProfileChip();
+  void checkResume();
   if (!(engine.current instanceof homeSceneCtor)) engine.setScene(new homeSceneCtor(engine));
   setUrlRoom(null);
 }

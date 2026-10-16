@@ -7,6 +7,7 @@ export function startFakeSupabase(port = 0) {
   const tokens = new Map(); // token -> id
   const tables = { results: [], legacy_stats: [] };
   const profiles = new Map(); // id -> { name, avatar, code }
+  const rooms = new Map(); // code -> { data, saved_at }
   const friends = new Set(); // "a|b" (ambos sentidos)
   const requests = new Set(); // "from|to"
   let codeSeq = 0;
@@ -55,7 +56,7 @@ export function startFakeSupabase(port = 0) {
     const json = body ? JSON.parse(body) : {};
     log.push({ method: req.method, path: url.pathname, query: url.search });
 
-    if (url.pathname === '/__state') return send(res, 200, { users: [...users.values()], tables, log, profiles: Object.fromEntries(profiles), friends: [...friends], requests: [...requests] });
+    if (url.pathname === '/__state') return send(res, 200, { users: [...users.values()], tables, log, rooms: Object.fromEntries(rooms), profiles: Object.fromEntries(profiles), friends: [...friends], requests: [...requests] });
     if (url.pathname === '/__insert' && req.method === 'POST') {
       tables.results.push({ ...json, played_at: new Date().toISOString() });
       return send(res, 200, { ok: true });
@@ -131,6 +132,21 @@ export function startFakeSupabase(port = 0) {
       const a = url.searchParams.get('user_id')?.replace(/^eq\./, '');
       const b = url.searchParams.get('friend_id')?.replace(/^eq\./, '');
       return send(res, 200, friends.has(`${a}|${b}`) ? [{ user_id: a }] : []);
+    }
+
+    // Salas guardadas (solo el servidor, con la llave secreta)
+    if (url.pathname === '/rest/v1/rooms_state') {
+      if (whoami(req) !== 'service') return send(res, 401, {});
+      const code = url.searchParams.get('code')?.replace(/^eq\./, '');
+      if (req.method === 'GET') return send(res, 200, rooms.has(code) ? [rooms.get(code)] : []);
+      if (req.method === 'POST') {
+        rooms.set(json.code, { data: json.data, saved_at: json.saved_at ?? new Date().toISOString() });
+        return send(res, 201);
+      }
+      if (req.method === 'DELETE') {
+        if (code) rooms.delete(code);
+        return send(res, 204);
+      }
     }
 
     const m = url.pathname.match(/^\/rest\/v1\/(results|legacy_stats)$/);

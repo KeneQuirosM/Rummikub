@@ -14,8 +14,8 @@ const state = async () => (await (await fetch(`http://localhost:${fake.port}/__s
   log: { method: string; path: string }[];
 };
 
-test.beforeAll(async () => {
-  fake = await startFakeSupabase();
+/** Arranca el servidor del juego (también para simular un redespliegue). */
+async function startServer() {
   srv = spawn('node', ['server/dist/index.js'], {
     env: {
       ...process.env,
@@ -27,9 +27,22 @@ test.beforeAll(async () => {
     stdio: 'inherit',
   });
   await expect.poll(async () => (await fetch(`${base}/healthz`).catch(() => null))?.ok ?? false, { timeout: 15_000 }).toBe(true);
+}
+
+/** Apaga el servidor como Render en un redespliegue (SIGTERM) y espera a que termine. */
+async function stopServer() {
+  const s = srv;
+  const done = new Promise((res) => s.once('exit', res));
+  s.kill('SIGTERM');
+  await done;
+}
+
+test.beforeAll(async () => {
+  fake = await startFakeSupabase();
+  await startServer();
 });
 test.afterAll(async () => {
-  srv?.kill();
+  if (srv && srv.exitCode === null) await stopServer();
   fake?.server.close();
 });
 
@@ -191,4 +204,57 @@ test('amigos: agregar por código, aceptar, ver en línea, invitar a la sala; lo
   await expect(A.locator('.game-detail')).toContainText('Fichas robadas');
   await A.waitForTimeout(300);
   await A.screenshot({ path: 'test-results/history-detail.png' });
+});
+
+test('redespliegue a mitad de partida: la sala se recupera y "Volver a tu partida" en el menú', async ({ browser }) => {
+  const mk = async (name: string) => {
+    const c = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+    extra.push(c);
+    await c.addInitScript((n) => {
+      localStorage.setItem('rummi.settings.v1', JSON.stringify({ tutorialDone: true, fullscreen: false, sound: false }));
+      localStorage.setItem('rummi.profile.v1', JSON.stringify({ name: n, avatar: '🦊' }));
+    }, name);
+    const p = await c.newPage();
+    await p.goto(base);
+    await expect(p.locator('#menu')).toBeVisible();
+    return p;
+  };
+  type V = { status: string; rack: number[]; turn: number; you: number; roomCode: string } | null;
+  const view = (p: import('@playwright/test').Page) => p.evaluate(() => (window as unknown as { __rummi: { view(): V } }).__rummi.view());
+  const A = await mk('Ana');
+  const B = await mk('Beto');
+  await A.click('#btn-create');
+  await expect(A.locator('#lobby')).toBeVisible();
+  const code = (await A.locator('#lobby-code').textContent())!.trim();
+  await B.goto(`${base}/?r=${code}`);
+  await expect(B.locator('#lobby')).toBeVisible();
+  await A.click('#btn-start');
+  await expect.poll(async () => (await view(A))?.status, { timeout: 15_000 }).toBe('playing');
+  const rackA = (await view(A))!.rack;
+  const turn = (await view(A))!.turn;
+  await expect.poll(async () => Object.keys((await (await fetch(`http://localhost:${fake.port}/__state`)).json()).rooms)).toContain(code);
+
+  // Redespliegue: el servidor se apaga (guarda la sala) y arranca otro sin nada en memoria
+  await stopServer();
+  await startServer();
+
+  // Los jugadores reconectan solos y siguen en la misma partida con el mismo atril
+  await expect.poll(async () => (await view(A))?.status, { timeout: 20_000 }).toBe('playing');
+  await expect.poll(async () => [...((await view(A))?.rack ?? [])].sort().join(), { timeout: 20_000 }).toBe([...rackA].sort().join());
+  expect((await view(A))!.turn).toBe(turn);
+  await expect(A.locator('#act-draw')).toBeVisible();
+
+  // B cerró la pestaña sin querer: al abrir el juego, el menú ofrece volver
+  const rackB = (await view(B))!.rack;
+  await B.goto(`${base}/`);
+  await B.evaluate(() => history.replaceState(null, '', '/'));
+  await B.reload();
+  await expect(B.locator('#btn-resume')).toBeVisible({ timeout: 15_000 });
+  await expect(B.locator('#btn-resume')).toContainText('Partida en curso');
+  await B.waitForTimeout(300);
+  await B.screenshot({ path: 'test-results/resume-button.png' });
+  await B.click('#btn-resume');
+  await expect.poll(async () => (await view(B))?.status, { timeout: 15_000 }).toBe('playing');
+  expect([...(await view(B))!.rack].sort().join()).toBe([...rackB].sort().join());
+
 });

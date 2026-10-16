@@ -3,6 +3,7 @@ import { io as ioc, type Socket } from 'socket.io-client';
 import type { Ack, ClientToServerEvents, InvitePayload, PlayerView, PresenceInfo, RoomJoined, ServerToClientEvents } from '@rummi/shared';
 import { createApp, type App } from '../src/app.js';
 import type { Accounts, ResultRow } from '../src/accounts.js';
+import { memoryStore } from '../src/store.js';
 import { RoomManager, sanitizeChat, sanitizeName } from '../src/rooms.js';
 
 type C = Socket<ServerToClientEvents, ClientToServerEvents>;
@@ -502,5 +503,100 @@ describe('cuentas', () => {
     }
     // sin cuentas: configuración vacía
     expect(await (await fetch(`${url}/config.json`)).json()).toEqual({});
+  });
+});
+
+describe('salas que sobreviven reinicios', () => {
+  it('redespliegue a mitad de partida: el servidor nuevo recupera la sala y los jugadores siguen', async () => {
+    const store = memoryStore();
+    const s1 = await createApp({ port: 0, store });
+    const u1 = `http://localhost:${s1.port}`;
+    const mk = (u: string) =>
+      new Promise<C>((res) => {
+        const c: C = ioc(u, { transports: ['websocket'], forceNew: true, reconnection: false });
+        clients.push(c);
+        c.on('connect', () => res(c));
+      });
+    const a = await mk(u1);
+    const b = await mk(u1);
+    const ra = await new Promise<Ack<RoomJoined>>((res) => a.emit('room:create', { name: 'Ana', avatar: '🦊', settings: { turnSeconds: 60 } }, res));
+    if (!ra.ok) throw new Error('create');
+    const rb = await join(b, ra.code);
+    if (!rb.ok) throw new Error('join');
+    expect((await new Promise<Ack>((res) => a.emit('room:start', res))).ok).toBe(true);
+    const g1 = s1.rooms.rooms.get(ra.code)!.game!;
+    // El jugador en turno mueve una ficha a la mesa (estado a medio turno)
+    const turnClient = g1.turn === ra.seat ? a : b;
+    const tile = g1.racks[g1.turn]![0]!;
+    expect((await new Promise<Ack>((res) => turnClient.emit('game:intent', { type: 'move', tileId: tile, to: { kind: 'new' } }, res))).ok).toBe(true);
+    const before = JSON.parse(JSON.stringify(g1));
+    // Estado pedido por el botón "Volver a tu partida"
+    const st = (await (await fetch(`${u1}/room-status?code=${ra.code}&token=${ra.token}`)).json()) as { exists: boolean; status: string };
+    expect(st).toEqual({ exists: true, status: 'playing', players: 2 });
+    expect(await (await fetch(`${u1}/room-status?code=${ra.code}&token=otro`)).json()).toEqual({ exists: false });
+
+    // Apagado (SIGTERM): guarda todas las salas
+    await s1.close();
+    expect(store.rows.has(ra.code)).toBe(true);
+
+    // Servidor nuevo, sin nada en memoria: la sala se recupera al volver
+    const s2 = await createApp({ port: 0, store });
+    try {
+      const u2 = `http://localhost:${s2.port}`;
+      expect(s2.rooms.rooms.size).toBe(0);
+      expect(await (await fetch(`${u2}/room-status?code=${ra.code}&token=${rb.token}`)).json()).toEqual({ exists: true, status: 'playing', players: 2 });
+      const a2 = await mk(u2);
+      const b2 = await mk(u2);
+      const va = nextState(a2);
+      expect(await join(a2, ra.code, ra.token, 'Ana')).toMatchObject({ ok: true, seat: ra.seat });
+      const v = await va;
+      expect(v.status).toBe('playing');
+      expect(v.rack).toEqual(before.working.rack.length && before.turn === ra.seat ? before.working.rack : before.racks[ra.seat]);
+      expect(v.table.flatMap((m) => m.tiles)).toContain(tile);
+      expect(await join(b2, ra.code, rb.token)).toMatchObject({ ok: true, seat: rb.seat });
+      const g2 = s2.rooms.rooms.get(ra.code)!.game!;
+      expect(g2.racks).toEqual(before.racks);
+      expect(g2.turn).toBe(before.turn);
+      // El turno en curso recibe margen tras el reinicio
+      expect(g2.turnDeadline! - Date.now()).toBeGreaterThan(25_000);
+      // Y se sigue jugando: deshacer y robar
+      const tc = g2.turn === ra.seat ? a2 : b2;
+      expect((await new Promise<Ack>((res) => tc.emit('game:intent', { type: 'draw' }, res))).ok).toBe(true);
+      expect(s2.rooms.rooms.get(ra.code)!.game!.turn).not.toBe(before.turn);
+      // Un código guardado no se reutiliza para salas nuevas
+      expect(store.rows.size).toBe(1);
+    } finally {
+      await s2.close();
+    }
+  });
+
+  it('crear sala evita códigos de salas guardadas; cerrar la sala la borra', async () => {
+    const store = memoryStore();
+    const s = await createApp({ port: 0, store });
+    try {
+      const u = `http://localhost:${s.port}`;
+      const c: C = await new Promise((res) => {
+        const x: C = ioc(u, { transports: ['websocket'], forceNew: true, reconnection: false });
+        clients.push(x);
+        x.on('connect', () => res(x));
+      });
+      // Ocupar en la persistencia casi todos los códigos posibles no es práctico: forzar el generador
+      const taken = 'ABCD';
+      await store.save(taken, { v: 1 });
+      const rm = s.rooms as unknown as { newCode(): string };
+      const orig = rm.newCode.bind(rm);
+      let calls = 0;
+      rm.newCode = () => (calls++ === 0 ? taken : orig());
+      const r = await new Promise<Ack<RoomJoined>>((res) => c.emit('room:create', { name: 'Ana', avatar: '🦊', settings: {} }, res));
+      if (!r.ok) throw new Error('create');
+      expect(r.code).not.toBe(taken);
+      await new Promise((res) => setTimeout(res, 400));
+      expect(store.rows.has(r.code)).toBe(true);
+      c.emit('room:leave');
+      await new Promise((res) => setTimeout(res, 100));
+      expect(store.rows.has(r.code)).toBe(false);
+    } finally {
+      await s.close();
+    }
   });
 });

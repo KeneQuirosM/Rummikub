@@ -107,6 +107,21 @@ export function setSessionToken(code: string, token: string): void {
   save(SESSION_KEY, all);
 }
 
+export function clearSessionToken(code: string): void {
+  const all = load<Record<string, { token: string; at: number }>>(SESSION_KEY, {});
+  delete all[code];
+  save(SESSION_KEY, all);
+}
+
+/** La última sala en la que estuve (para "Volver a tu partida"), si es reciente. */
+export function latestSession(maxAgeMs = 12 * 60 * 60_000): { code: string; token: string } | null {
+  const all = load<Record<string, { token: string; at: number }>>(SESSION_KEY, {});
+  const best = Object.entries(all)
+    .filter(([, v]) => Date.now() - v.at < maxAgeMs)
+    .sort((a, b) => b[1].at - a[1].at)[0];
+  return best ? { code: best[0], token: best[1].token } : null;
+}
+
 export function getLastRoom(): string | undefined {
   try {
     return sessionStorage.getItem('rummi.lastRoom') ?? undefined;

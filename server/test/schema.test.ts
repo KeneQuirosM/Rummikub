@@ -97,6 +97,10 @@ describe('esquema de Supabase', () => {
     await expect(
       as(D, (tx) => tx.query(`insert into public.results (user_id, mode, place, players, won, points, duration_sec) values ($1, 'bot', 1, 2, true, 0, 60)`, [A])),
     ).rejects.toThrow();
+    // Las salas guardadas (con los atriles de todos) solo las ve el servidor
+    await db.query(`insert into public.rooms_state (code, data) values ('ABCD', '{"v":1}')`);
+    await expect(as(D, (tx) => tx.query(`select * from public.rooms_state`))).rejects.toThrow();
+    await expect(as(D, (tx) => tx.query(`insert into public.rooms_state (code, data) values ('WXYZ', '{}')`))).rejects.toThrow();
     // Los invitados sin sesión no llaman funciones
     await expect(as(null, (tx) => tx.query(`select public.my_friends()`))).rejects.toThrow();
   });

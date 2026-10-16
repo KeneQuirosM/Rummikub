@@ -246,6 +246,9 @@ Con cuentas también hay:
 - **Logros** (15) calculados desde el historial (`shared/src/achievements.ts`): primera victoria, rachas, 10 fichas en un turno, ganar sin robar, victoria relámpago, mesa llena, torneo, bot difícil… Varios temas de mesa y dorsos se desbloquean con logros.
 - **Historial detallado**: toca una partida para ver rivales con su puesto y puntos, duración, mejor jugada y fichas robadas.
 
+- **Salas que sobreviven reinicios**: con Supabase configurado, el servidor guarda cada sala (`rooms_state`, solo accesible con la llave secreta) poco después de cada cambio y todas al apagarse (SIGTERM). Tras un reinicio o redespliegue no carga nada de golpe: recupera la sala cuando un jugador reconecta, así lee lo último que guardó el servidor anterior. El turno en curso recibe 30 s de margen y el relevo del bot se cuenta de nuevo. Las salas guardadas que nadie recupera se borran a las 12 h.
+- **Volver a tu partida**: si cierras la pestaña sin querer, el menú muestra un botón para volver a tu sala (consulta `/room-status`). Salir a propósito lo quita.
+
 Configuración (una vez):
 1. Crear un proyecto en [supabase.com](https://supabase.com) y ejecutar [`supabase/schema.sql`](supabase/schema.sql) en *SQL Editor*. El archivo se puede ejecutar de nuevo sin problema: hazlo cada vez que cambie (añade columnas y funciones nuevas sin borrar datos). Sus reglas de seguridad y funciones se prueban contra Postgres real con PGlite (`server/test/schema.test.ts`).
 2. *Authentication → Sign In / Providers*: activar **Allow anonymous sign-ins**, **Allow manual linking**, **Email** y **Google** (Client ID/Secret de Google Cloud; en Google Cloud, URI de redirección autorizada `https://<proyecto>.supabase.co/auth/v1/callback`).

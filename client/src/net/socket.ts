@@ -10,7 +10,7 @@ import type {
   ServerToClientEvents,
 } from '@rummi/shared';
 import { accessToken } from '../account';
-import { profile, setSessionToken } from '../settings';
+import { clearSessionToken, profile, setSessionToken } from '../settings';
 import { Emitter, type Transport, type TransportEvents } from './transport';
 
 export const SERVER_URL: string | undefined = import.meta.env.VITE_SERVER_URL || undefined;
@@ -149,6 +149,8 @@ export class SocketTransport implements Transport {
 
   leave(): void {
     this.left = true;
+    // Salió a propósito: el menú ya no ofrece "Volver a tu partida"
+    if (this.code) clearSessionToken(this.code);
     this.socket.emit('room:leave');
     this.em.clear();
     setTimeout(() => this.socket.close(), 100);

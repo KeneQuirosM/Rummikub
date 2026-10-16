@@ -81,7 +81,15 @@ export interface Room {
   gameId: string;
   /** Último evento de juego ya contado en bestPlay. */
   seenEventSeq: number;
+  /**
+   * Recuperada de la persistencia tras un reinicio: momento en que se había guardado.
+   * Mientras nadie se conecte, se puede reemplazar por una copia más nueva.
+   */
+  restoredFrom?: number;
 }
+
+/** Tras recuperar una sala en plena partida, el turno en curso dura al menos esto. */
+export const RESTORE_TURN_GRACE_MS = 30_000;
 
 export type JoinResult =
   | { ok: true; room: Room; seat: Seat; token: string; reconnected: boolean }
@@ -337,6 +345,38 @@ export class RoomManager {
       }
     }
     return changed;
+  }
+
+  /** Copia serializable para guardar (sin sockets ni planes del bot). */
+  serialize(room: Room): unknown {
+    const { botPlan: _bp, restoredFrom: _rf, ...rest } = room;
+    return { v: 1, ...rest, seats: room.seats.map((s) => ({ ...s, socketId: null })) };
+  }
+
+  /**
+   * Recupera una sala guardada. Todos quedan desconectados (reconectan solos con su token);
+   * se reinicia la cuenta para el relevo por el bot y el turno en curso recibe un margen.
+   */
+  restore(code: string, raw: unknown, savedAt: number): Room | null {
+    const d = raw as Partial<Room> & { v?: number };
+    if (!d || d.v !== 1 || d.code !== code || !Array.isArray(d.seats) || !d.seats.length || !d.settings) return null;
+    const now = this.now();
+    const room = {
+      ...(d as Room),
+      botPlan: null,
+      lastActivity: now,
+      restoredFrom: savedAt,
+      seats: d.seats.map((s) => ({ ...s, socketId: null, disconnectedAt: now, userId: s.userId ?? null })),
+      bestPlay: d.bestPlay ?? [],
+      draws: d.draws ?? [],
+      gameId: d.gameId ?? '',
+    } as Room & { v?: number };
+    delete room.v;
+    const g = room.game;
+    if (g?.status === 'playing' && g.turnDeadline !== null) g.turnDeadline = Math.max(g.turnDeadline, now + RESTORE_TURN_GRACE_MS);
+    if (room.host >= room.seats.length) room.host = 0;
+    this.rooms.set(code, room);
+    return room;
   }
 
   /** Próximo momento en que hay que revisar la sala (fin de turno o relevo de un ausente). */
